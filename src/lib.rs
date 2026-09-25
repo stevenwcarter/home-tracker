@@ -6,6 +6,7 @@ pub mod config;
 pub mod db;
 pub mod graphql;
 pub mod healthcheck;
+pub mod import;
 pub mod kinds;
 pub mod models;
 pub mod money;
