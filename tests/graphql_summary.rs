@@ -34,6 +34,16 @@ async fn summary_query_returns_the_placeholder_numbers_and_currency() {
 }
 
 #[tokio::test]
+async fn get_is_not_allowed() {
+    let db = TestDb::new();
+    let server = TestServer::new(app(db.pool.clone()));
+
+    let response = server.get("/graphql?query={summary{currency}}").await;
+
+    response.assert_status(axum::http::StatusCode::METHOD_NOT_ALLOWED);
+}
+
+#[tokio::test]
 async fn unknown_field_is_a_graphql_error_not_a_500() {
     let db = TestDb::new();
     let server = TestServer::new(app(db.pool.clone()));
