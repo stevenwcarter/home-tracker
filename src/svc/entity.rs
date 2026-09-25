@@ -125,7 +125,36 @@ pub fn location_tree(conn: &mut SqliteConnection) -> Result<Vec<LocationNode>> {
             .filter(|p| location_ids.contains(p));
         by_parent.entry(parent).or_default().push(location);
     }
-    Ok(take_subtree(&mut by_parent, None))
+    let mut roots = take_subtree(&mut by_parent, None);
+    // Whatever is left sits on (or under) a parent cycle and has no root to be
+    // reached from. Promote the lowest-named leftover until nothing is hidden.
+    while let Some(entity) = take_lowest(&mut by_parent) {
+        let children = take_subtree(&mut by_parent, Some(entity.id.clone()));
+        roots.push(LocationNode { entity, children });
+    }
+    roots.sort_by_cached_key(|node| node.entity.name.to_lowercase());
+    Ok(roots)
+}
+
+/// Removes the remaining location with the lowest case-insensitive name (ties
+/// broken by id, so the choice does not depend on `HashMap` order).
+fn take_lowest(by_parent: &mut HashMap<Option<String>, Vec<Entity>>) -> Option<Entity> {
+    let (parent, index) = by_parent
+        .iter()
+        .flat_map(|(parent, siblings)| {
+            siblings
+                .iter()
+                .enumerate()
+                .map(move |(index, entity)| (parent, index, entity))
+        })
+        .min_by_key(|(_, _, entity)| (entity.name.to_lowercase(), &entity.id))
+        .map(|(parent, index, _)| (parent.clone(), index))?;
+    let siblings = by_parent.get_mut(&parent)?;
+    let entity = siblings.remove(index);
+    if siblings.is_empty() {
+        by_parent.remove(&parent);
+    }
+    Some(entity)
 }
 
 /// Removes and nests the children of `parent`. Removing each list as it is
@@ -147,7 +176,8 @@ fn take_subtree(
 }
 
 /// Entities whose name contains `query` (case-insensitive, `%`/`_` literal),
-/// non-archived first, then by name; at most `limit` rows.
+/// non-archived first, then by name; at most `limit` rows (at least one, so a
+/// non-positive limit never reaches SQLite, where `LIMIT -1` means unlimited).
 pub fn search(conn: &mut SqliteConnection, query: &str, limit: i64) -> Result<Vec<Entity>> {
     entities::table
         .filter(
@@ -156,7 +186,7 @@ pub fn search(conn: &mut SqliteConnection, query: &str, limit: i64) -> Result<Ve
                 .escape('\\'),
         )
         .order((entities::archived.asc(), sql::<Text>("lower(name)")))
-        .limit(limit)
+        .limit(limit.max(1))
         .select(Entity::as_select())
         .load(conn)
         .with_context(|| format!("searching entities for {query:?}"))
@@ -305,6 +335,28 @@ mod tests {
     }
 
     #[test]
+    fn location_tree_surfaces_a_parent_cycle_as_roots() {
+        // A cycle has no root to walk down from; it must still be navigable.
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        seed_sample(&mut conn);
+        diesel::sql_query("UPDATE entities SET parent_id = 'e-tote-a' WHERE id = 'e-house'")
+            .execute(&mut conn)
+            .unwrap();
+        fn flatten<'a>(nodes: &'a [LocationNode], out: &mut Vec<&'a str>) {
+            for node in nodes {
+                out.push(&node.entity.id);
+                flatten(&node.children, out);
+            }
+        }
+        let tree = location_tree(&mut conn).unwrap();
+        let mut ids = Vec::new();
+        flatten(&tree, &mut ids);
+        ids.sort_unstable();
+        assert_eq!(ids, ["e-attic", "e-garage", "e-house", "e-tote-a"]);
+    }
+
+    #[test]
     fn search_matches_name_case_insensitively_and_escapes_wildcards() {
         // Review Focus 5: user input must not act as a LIKE pattern.
         let db = TestDb::new();
@@ -348,5 +400,7 @@ mod tests {
             .collect();
         assert_eq!(ids, ["e-zeta", "e-zeta-old"]);
         assert_eq!(search(&mut conn, "zeta", 1).unwrap().len(), 1);
+        // A non-positive limit must not become SQLite's `LIMIT -1` (unlimited).
+        assert_eq!(search(&mut conn, "Zeta", 0).unwrap().len(), 1);
     }
 }
