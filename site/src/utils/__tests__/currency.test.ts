@@ -14,4 +14,8 @@ describe('formatCents', () => {
   it('never throws on an unknown currency code', () => {
     expect(formatCents(100, 'NOPE', 'en-US')).toBe('1.00 NOPE');
   });
+
+  it('defaults to en-US regardless of the runner locale', () => {
+    expect(formatCents(1234567, 'USD')).toBe('$12,345.67');
+  });
 });
