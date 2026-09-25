@@ -41,15 +41,13 @@ async fn main() -> Result<()> {
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => serve(config).await,
         Command::Import { path } => {
-            tracing::info!(?path, "import: not implemented yet");
-            Ok(())
+            anyhow::bail!(
+                "import is not implemented yet (planned for phase 2); got {}",
+                path.display()
+            )
         }
         Command::Healthcheck { port } => {
-            tracing::info!(
-                port = port.unwrap_or(config.port),
-                "healthcheck: not implemented yet"
-            );
-            Ok(())
+            home_tracker::healthcheck::run(port.unwrap_or(config.port))
         }
     }
 }

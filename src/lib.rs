@@ -4,6 +4,7 @@ pub mod api;
 pub mod config;
 pub mod db;
 pub mod graphql;
+pub mod healthcheck;
 pub mod net;
 pub mod routes;
 pub mod schema;
