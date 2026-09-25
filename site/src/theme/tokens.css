@@ -1,0 +1,47 @@
+/*
+ * Semantic colour tokens. Components use only the Tailwind utilities derived
+ * from these (bg-surface, text-muted, ...), never raw palette classes, so a
+ * theme is exactly one block of variables. Dark is the default; the light
+ * block is a stub to be tuned when a light theme is actually wanted.
+ */
+:root,
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --t-bg: #0f1115;
+  --t-surface: #171a21;
+  --t-surface-raised: #1f2330;
+  --t-border: #2a2f3d;
+  --t-text: #e6e8ee;
+  --t-text-muted: #9aa3b5;
+  --t-accent: #6ea8fe;
+  --t-accent-text: #0b1020;
+  --t-danger: #f0616d;
+  --t-success: #4fd1a1;
+}
+
+:root[data-theme='light'] {
+  color-scheme: light;
+  --t-bg: #f6f7fb;
+  --t-surface: #ffffff;
+  --t-surface-raised: #eef0f6;
+  --t-border: #d6dae6;
+  --t-text: #171a21;
+  --t-text-muted: #5b6474;
+  --t-accent: #2f6fed;
+  --t-accent-text: #ffffff;
+  --t-danger: #c92a37;
+  --t-success: #1f8f66;
+}
+
+@theme inline {
+  --color-bg: var(--t-bg);
+  --color-surface: var(--t-surface);
+  --color-surface-raised: var(--t-surface-raised);
+  --color-border: var(--t-border);
+  --color-text: var(--t-text);
+  --color-muted: var(--t-text-muted);
+  --color-accent: var(--t-accent);
+  --color-accent-text: var(--t-accent-text);
+  --color-danger: var(--t-danger);
+  --color-success: var(--t-success);
+}
