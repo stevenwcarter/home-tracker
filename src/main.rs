@@ -71,10 +71,38 @@ async fn serve(config: Config) -> Result<()> {
     tracing::info!(%addr, dual_stack = addr.is_ipv6(), "listening");
 
     axum::serve(listener, routes::app(pool))
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-            tracing::info!("shutting down");
-        })
+        .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")
+}
+
+/// Waits for SIGINT (Ctrl-C) or, on unix, SIGTERM (what `docker stop` sends).
+///
+/// The `scratch` image runs this binary as PID 1, where the kernel drops
+/// SIGTERM for a process unless it installs a handler; without this, every
+/// `docker stop` has to wait out the full grace period and then SIGKILL.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(err) => {
+                tracing::warn!(%err, "failed to install SIGTERM handler");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!(signal = "SIGINT", "shutting down"),
+        _ = terminate => tracing::info!(signal = "SIGTERM", "shutting down"),
+    }
 }
