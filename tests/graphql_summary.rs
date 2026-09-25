@@ -1,11 +1,16 @@
 use axum_test::TestServer;
 use home_tracker::db::TestDb;
 use home_tracker::routes::app;
+use home_tracker::svc::fixtures::seed_sample;
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn summary_query_returns_the_placeholder_numbers_and_currency() {
+async fn summary_query_reports_the_sample_statistics() {
     let db = TestDb::new();
+    {
+        let mut conn = db.pool.get().unwrap();
+        seed_sample(&mut conn);
+    }
     let server = TestServer::new(app(db.pool.clone()));
 
     let response = server
@@ -22,11 +27,11 @@ async fn summary_query_returns_the_placeholder_numbers_and_currency() {
         json!({
             "data": {
                 "summary": {
-                    "totalValueCents": 1_234_567,
+                    "totalValueCents": 67_297,
                     "currency": "USD",
-                    "totalItems": 42,
-                    "totalLocations": 7,
-                    "totalTags": 5
+                    "totalItems": 4,
+                    "totalLocations": 4,
+                    "totalTags": 2
                 }
             }
         })
