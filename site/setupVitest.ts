@@ -10,18 +10,35 @@ import { vi, beforeEach } from 'vitest';
 // to `undefined`. Install a minimal in-memory Storage polyfill in that case
 // so tests behave the same across Node versions without relying on a
 // --no-experimental-webstorage flag that doesn't exist on every Node major.
+//
 // Reading the stub once to feature-detect it triggers that Experimental
-// warning on stderr; swallow just that one warning so `yarn test` output
-// stays clean, without hiding any other process warning.
-const nodeWebStorageWarning = /localstorage-file/;
-const warningListeners = process.listeners('warning') as NodeJS.WarningListener[];
-process.removeAllListeners('warning');
-process.on('warning', (warning) => {
-  if (warning.name === 'ExperimentalWarning' && nodeWebStorageWarning.test(warning.message)) return;
-  warningListeners.forEach((listener) => listener(warning));
-});
+// warning on stderr. Swallow just that one read's warning, and only for
+// that read: install a filter immediately before it, then restore the
+// original listeners on the next tick. The restore can't happen
+// synchronously right after the read — Node emits `warning` via
+// `process.nextTick` internally, so the event fires *after* this function
+// returns; scheduling the restore with `process.nextTick` too (queued
+// after Node's own pending emission) lets the filter catch it before
+// stepping aside. Environments where the stub doesn't exist at all (real
+// localStorage already works, so there's nothing to swallow) end this tick
+// with no process-wiring side effects, and repeated setup-file runs never
+// stack wrapper-around-wrapper.
+function readGlobalLocalStorage(): typeof globalThis.localStorage {
+  const originalListeners = process.listeners('warning') as NodeJS.WarningListener[];
+  process.removeAllListeners('warning');
+  process.on('warning', (warning) => {
+    if (warning.name === 'ExperimentalWarning' && /localstorage-file/.test(warning.message)) return;
+    originalListeners.forEach((listener) => listener.call(process, warning));
+  });
+  const value = globalThis.localStorage;
+  process.nextTick(() => {
+    process.removeAllListeners('warning');
+    originalListeners.forEach((listener) => process.on('warning', listener));
+  });
+  return value;
+}
 
-if (typeof globalThis.localStorage === 'undefined') {
+if (typeof readGlobalLocalStorage() === 'undefined') {
   const createMemoryStorage = (): Storage => {
     const store = new Map<string, string>();
     return {

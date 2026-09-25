@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { act, renderHook } from '@testing-library/react';
 import React from 'react';
 import { ThemeProvider } from '../ThemeProvider';
@@ -35,15 +35,27 @@ describe('useTheme', () => {
   });
 
   it('survives storage that throws', () => {
-    const original = Storage.prototype.getItem;
-    Storage.prototype.getItem = () => {
+    // Seed a value a non-throwing getItem would happily return, so this
+    // test fails loudly (theme would come back 'light') if the throw below
+    // isn't actually reaching the code path readStoredTheme() calls.
+    localStorage.setItem(THEME_STORAGE_KEY, 'light');
+    // Stub whatever object actually serves reads: real Storage instances
+    // route through the shared prototype, but the in-memory polyfill used
+    // when Node's experimental webstorage stub is active (see
+    // setupVitest.ts) is a plain object with getItem as an own property,
+    // so the prototype must be bypassed for the stub to take effect there.
+    const target = localStorage instanceof Storage ? Storage.prototype : localStorage;
+    const original = target.getItem;
+    const throwingGetItem = vi.fn(() => {
       throw new Error('private mode');
-    };
+    });
+    target.getItem = throwingGetItem;
     try {
       const { result } = renderHook(() => useTheme(), { wrapper });
       expect(result.current.theme).toBe('dark');
+      expect(throwingGetItem).toHaveBeenCalled();
     } finally {
-      Storage.prototype.getItem = original;
+      target.getItem = original;
     }
   });
 
