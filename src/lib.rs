@@ -7,6 +7,7 @@ pub mod db;
 pub mod graphql;
 pub mod healthcheck;
 pub mod kinds;
+pub mod models;
 pub mod money;
 pub mod net;
 pub mod routes;
