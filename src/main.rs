@@ -40,16 +40,25 @@ async fn main() -> Result<()> {
 
     match cli.command.unwrap_or(Command::Serve) {
         Command::Serve => serve(config).await,
-        Command::Import { path } => {
-            anyhow::bail!(
-                "import is not implemented yet (planned for phase 2); got {}",
-                path.display()
-            )
-        }
+        Command::Import { path } => import(config, path),
         Command::Healthcheck { port } => {
             home_tracker::healthcheck::run(port.unwrap_or(config.port))
         }
     }
+}
+
+fn import(config: Config, path: PathBuf) -> Result<()> {
+    use anyhow::Context as _;
+    use home_tracker::{db, import};
+
+    let pool = db::build_pool(&config.database_url)?;
+    let mut conn = pool.get().context("connection for import")?;
+    db::run_migrations(&mut conn)?;
+    let mut source = import::source::open(&path)?;
+    tracing::info!(source = %source.describe(), data_dir = %config.data_dir.display(), "importing Homebox backup");
+    let report = import::run::import_backup(&mut conn, source.as_mut(), &config.data_dir)?;
+    println!("{report}");
+    Ok(())
 }
 
 async fn serve(config: Config) -> Result<()> {
@@ -62,8 +71,9 @@ async fn serve(config: Config) -> Result<()> {
         db::run_migrations(&mut conn)?;
         tracing::info!("migrations applied");
     }
-    std::fs::create_dir_all(config.data_dir.join("originals"))
-        .with_context(|| format!("could not create {}", config.data_dir.display()))?;
+    let originals_dir = config.data_dir.join("originals");
+    std::fs::create_dir_all(&originals_dir)
+        .with_context(|| format!("could not create {}", originals_dir.display()))?;
 
     let addr = net::listen_addr(&config.listen_address, config.port)?;
     let listener = tokio::net::TcpListener::from_std(net::bind(addr)?)

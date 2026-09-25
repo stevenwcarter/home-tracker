@@ -1,6 +1,7 @@
 mod support;
 
 use std::fs;
+use std::path::Path;
 
 use chrono::NaiveDate;
 use diesel::prelude::*;
@@ -368,6 +369,18 @@ fn an_attachment_without_a_blob_is_skipped_with_a_warning() {
             .unwrap()
             .is_some()
     );
+}
+
+/// Not part of the suite: writes the mini backup to the shared cargo target dir
+/// so it can be imported manually with `cargo run -- import <path>`. Run with
+/// `cargo test --test import -- --ignored write_mini_backup_to_target_dir`.
+#[test]
+#[ignore]
+fn write_mini_backup_to_target_dir() {
+    let dir = Path::new("/home/.build/cargo-target/mini-backup");
+    fs::create_dir_all(dir).unwrap();
+    MiniBackup::write_dir(dir);
+    println!("wrote mini backup to {}", dir.display());
 }
 
 #[test]
