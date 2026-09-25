@@ -1,2 +1,2 @@
-cd site && npx lint-staged && CI=true yarn test --run
+cd site && yarn lint-staged && CI=true yarn test --run
 cd .. && cargo fmt --all --check && cargo clippy --all-targets -- -D warnings
