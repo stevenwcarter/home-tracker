@@ -1,7 +1,10 @@
 #![warn(clippy::str_to_string)]
 
 pub mod config;
+pub mod db;
 pub mod net;
+pub mod schema;
+pub mod svc;
 
 use tracing_subscriber::{EnvFilter, fmt};
 
