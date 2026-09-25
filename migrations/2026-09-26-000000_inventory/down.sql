@@ -1,0 +1,9 @@
+DROP TABLE template_fields;
+DROP TABLE entity_templates;
+DROP TABLE entity_fields;
+DROP TABLE thumbnails;
+DROP TABLE attachments;
+DROP TABLE tag_entities;
+DROP TABLE tags;
+DROP TABLE entities;
+DROP TABLE entity_types;

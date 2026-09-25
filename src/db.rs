@@ -11,7 +11,12 @@ use diesel_migrations::{EmbeddedMigrations, MigrationHarness, embed_migrations};
 
 pub type SqlitePool = Pool<ConnectionManager<SqliteConnection>>;
 
-pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+/// Seeded built-in entity type ids (see the inventory migration). The importer
+/// maps Homebox's `global.location` / `global.item` onto these by name.
+pub const LOCATION_TYPE_ID: &str = "00000000-0000-7000-8000-000000000001";
+pub const ITEM_TYPE_ID: &str = "00000000-0000-7000-8000-000000000002";
+
+const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 /// Sets the per-connection PRAGMAs. `busy_timeout` goes first so a locked
 /// database waits instead of failing the PRAGMAs that follow.
@@ -123,6 +128,39 @@ mod tests {
         assert_eq!(on.foreign_keys, 1);
     }
 
+    #[test]
+    fn wal_and_busy_timeout_are_set_on_every_connection() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let mode = diesel::sql_query("PRAGMA journal_mode")
+            .get_result::<JournalMode>(&mut conn)
+            .unwrap();
+        assert_eq!(mode.journal_mode.to_lowercase(), "wal");
+        let timeout = diesel::sql_query("PRAGMA busy_timeout")
+            .get_result::<BusyTimeout>(&mut conn)
+            .unwrap();
+        assert_eq!(timeout.timeout, 5000);
+    }
+
+    #[test]
+    fn built_in_types_are_seeded() {
+        use crate::schema::entity_types::dsl::*;
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let rows: Vec<(String, String, bool)> = entity_types
+            .select((id, name, is_location))
+            .order(name.asc())
+            .load(&mut conn)
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![
+                (ITEM_TYPE_ID.to_owned(), "Item".to_owned(), false),
+                (LOCATION_TYPE_ID.to_owned(), "Location".to_owned(), true),
+            ]
+        );
+    }
+
     #[derive(QueryableByName)]
     struct Count {
         #[diesel(sql_type = diesel::sql_types::BigInt)]
@@ -133,5 +171,17 @@ mod tests {
     struct ForeignKeys {
         #[diesel(sql_type = diesel::sql_types::Integer)]
         foreign_keys: i32,
+    }
+
+    #[derive(QueryableByName)]
+    struct JournalMode {
+        #[diesel(sql_type = diesel::sql_types::Text)]
+        journal_mode: String,
+    }
+
+    #[derive(QueryableByName)]
+    struct BusyTimeout {
+        #[diesel(sql_type = diesel::sql_types::Integer)]
+        timeout: i32,
     }
 }
