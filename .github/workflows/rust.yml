@@ -96,7 +96,7 @@ jobs:
           dir: ./site
   build-docker:
     runs-on: ubuntu-latest
-    needs: [build-site, test-site]
+    needs: [coverage, build-site, test-site]
     env:
       # REGISTRY is the tailnet name CI pushes to; PUBLIC_REGISTRY is the name
       # the deployed containers were created from, which is what Watchtower has
