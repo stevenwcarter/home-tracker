@@ -10,12 +10,14 @@ by fixed dummy numbers.
 ## Run with Docker
 
 ```bash
-docker run -p 7008:7008 -v ht-data:/data home-tracker
+docker run -p 7008:7008 -v ht-data:/data home-tracker:dev
 ```
 
 The image is `scratch`-based (musl, no shell) and exposes a `HEALTHCHECK` via
 the binary's own `healthcheck` subcommand. `ht-data` holds the SQLite database
-and, from a later phase, uploaded photos.
+and, from a later phase, uploaded photos. `just docker-build` builds this
+`home-tracker:dev` tag locally; CI publishes tagged images to the registry
+on every push.
 
 | Env var | Default | Meaning |
 |---------|---------|---------|

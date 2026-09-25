@@ -77,13 +77,13 @@ Single Rust crate at the repo root with an embedded, Vite-built React frontend. 
 
 **Package manager**: always `yarn` in `site/`, never `npm`.
 
-**Semantic theme tokens only**: components use only the ten Tailwind classes derived from `theme/tokens.css` variables:
+**Semantic theme tokens only**: components use only these Tailwind classes derived from `theme/tokens.css` variables:
 `bg-bg`, `bg-surface`, `bg-surface-raised`, `border-border`, `text-text`, `text-muted`, `bg-accent`, `text-accent`, `text-accent-text`, `text-danger`, `text-success`.
 Never a raw palette class like `bg-zinc-900`. A theme is exactly one block of `--t-*` variables in `theme/tokens.css` under a `[data-theme]` selector; adding a raw palette class silently breaks the second theme.
 
 **Button cursors**: Tailwind v4's Preflight resets buttons to `cursor: default`. `site/src/index.css` restores `cursor: pointer` for non-disabled buttons and `[role="button"]` in one base rule; don't add `cursor-pointer` per button.
 
-**Every mutation gates on `ctx.require_write()`**: `GraphQLContext.actor: Actor` (`Anonymous | User { id, role }`) is built fresh per request. `Actor::Anonymous` can write in v1 (`can_write()` returns `true`), so the gate is currently a no-op, but every mutation resolver calls `ctx.require_write()?` first anyway. When auth lands, only the context constructor and `Actor` change; the gate itself does not move.
+**Mutations must gate on `ctx.require_write()`**: there are no mutation resolvers yet (the schema uses `EmptyMutation`). When phase 4 adds them, every mutation resolver calls `ctx.require_write()?` first; `Actor::Anonymous` can write in v1 and auth later fills the actor.
 
 **`site/build/index.html` must exist before `cargo build`**: `routes.rs` embeds `site/build/` via `rust-embed` at compile time. Run `just site-placeholder` (stub) or `just build-site` (real bundle) first; both `just test` and `just cover` do this automatically.
 
