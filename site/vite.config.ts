@@ -2,7 +2,6 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import eslint from 'vite-plugin-eslint';
 import viteTsconfigPaths from 'vite-tsconfig-paths';
-import compress from 'vite-plugin-compression2';
 import tailwindcss from '@tailwindcss/vite';
 
 const PROXY_ENDPOINT = 'http://localhost:7008';
@@ -19,7 +18,7 @@ export default defineConfig(() => ({
       exclude: ['**/node_modules/**', '**/build/**', '**/*.js', 'src/main.tsx'],
     },
   },
-  plugins: [react(), eslint(), viteTsconfigPaths(), tailwindcss(), compress()],
+  plugins: [react(), eslint(), viteTsconfigPaths(), tailwindcss()],
   server: {
     watch: { ignored: ['coverage', 'build'] },
     proxy: {
