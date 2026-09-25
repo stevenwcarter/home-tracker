@@ -1,0 +1,195 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - "main"
+      - "develop"
+
+jobs:
+  coverage:
+    name: Cargo test coverage
+    runs-on: ubuntu-latest
+    container:
+      image: xd009642/tarpaulin:develop-nightly
+      options: --security-opt seccomp=unconfined
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Generate code coverage
+        run: |
+          mkdir -p site/build
+          touch site/build/index.html
+          # mkdir -p site/storybook-static
+          # touch site/storybook-static/index.html
+      - name: Generate code coverage
+        run: |
+          cargo +nightly tarpaulin --verbose --all-features --workspace --timeout 120 --out xml
+      - name: Upload to codecov.io
+        uses: codecov/codecov-action@v4
+        with:
+          flags: server
+          token: ${{ secrets.CODECOV_TOKEN }}
+      - name: Archive code coverage results
+        uses: actions/upload-artifact@v4
+        with:
+          flags: server
+          name: code-coverage-report
+          path: "cobertura.xml"
+  build-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Install Yarn
+        run: npm install -g yarn
+      - name: Use Node.js 22.x with caching
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Run install
+        uses: borales/actions-yarn@v5
+        with:
+          cmd: install --frozen-lockfile
+          dir: ./site
+      - name: Build production bundle
+        uses: borales/actions-yarn@v5
+        with:
+          cmd: build
+          dir: ./site
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-site-artifacts
+          path: ./site/build
+  test-site:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Use Node.js 22.x
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Install Yarn
+        run: npm install -g yarn
+      - name: Use Node.js 22.x with caching
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+      - name: Run install
+        uses: borales/actions-yarn@v5
+        with:
+          cmd: install --frozen-lockfile
+          dir: ./site
+      - name: Run tests
+        uses: borales/actions-yarn@v5
+        with:
+          cmd: test --run
+          dir: ./site
+  build-docker:
+    runs-on: ubuntu-latest
+    needs: [build-site, test-site]
+    env:
+      # REGISTRY is the tailnet name CI pushes to; PUBLIC_REGISTRY is the name
+      # the deployed containers were created from, which is what Watchtower has
+      # to be told about. Same registry, two doors. Both fall back to the old
+      # secret so nothing breaks if a variable is missing.
+      REGISTRY: ${{ vars.DOCKER_REGISTRY || secrets.DOCKER_REGISTRY }}
+      PUBLIC_REGISTRY: ${{ vars.DOCKER_PUBLIC_REGISTRY || vars.DOCKER_REGISTRY || secrets.DOCKER_REGISTRY }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Prepare site/build directory
+        run: |
+          mkdir -p ./site/build
+      - name: Download build site artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-site-artifacts
+          path: ./site/build/
+      # The registry is reached over Tailscale, not through its public
+      # Cloudflare-proxied hostname: Bot Fight Mode 403s `docker login` (it is
+      # zone-wide and cannot be scoped to a host or path), and the free plan's
+      # 100 MB body cap 413s any layer above it, since `docker push` sends each
+      # blob as one unchunked PUT. The OAuth client registers an ephemeral
+      # `tag:ci` node that Tailscale reaps when the job ends.
+      - name: Connect to Tailscale
+        uses: tailscale/github-action@v4
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+          # The registry is a Tailscale Service, whose virtual IP lives only in
+          # MagicDNS. `tailscale up` accepts DNS by default and the action adds
+          # no flags of its own, but pin it: without it the name never resolves.
+          args: --accept-dns=true
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: |
+            ${{ env.REGISTRY }}/home-tracker
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+      # `network=host` is load-bearing. The registry cache export below needs
+      # the docker-container driver, and that container's embedded resolver
+      # will not forward to the host's loopback systemd-resolved stub — it
+      # falls back to public DNS, where the tailnet name does not exist.
+      # Sharing the host's network namespace puts MagicDNS back in reach.
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: network=host
+      - name: Login to Docker registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.DOCKER_USERNAME }}
+          password: ${{ secrets.DOCKER_PASSWORD }}
+      - name: Build and push docker image w apikey functionality
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/home-tracker:buildcache
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/home-tracker:buildcache,mode=max,image-manifest=true,oci-mediatypes=true
+      - name: Trigger Watchtower update
+        # Notify Watchtower to pull the exact image:tag refs we just pushed and
+        # redeploy any container running them. Passes every tag from the metadata
+        # step as a comma-separated ?image= list so Watchtower scopes the update to
+        # this image instead of scanning every container it watches.
+        env:
+          IMAGE_TAGS: ${{ steps.meta.outputs.tags }}
+          WATCHTOWER_HTTP_API_TOKEN: ${{ secrets.WATCHTOWER_HTTP_API_TOKEN }}
+          # The notification rides the tailnet like the push; Bot Fight Mode
+          # would 403 this curl on the public hostname just as readily.
+          WATCHTOWER_URL: ${{ vars.WATCHTOWER_URL || 'https://watchtower.javapl.us' }}
+        run: |
+          # The image NAMES stay public even though the push went to the
+          # tailnet: the deployed container was created from a public ref and
+          # Watchtower matches `?image=` against it literally, so a tailnet-
+          # prefixed list matches nothing, returns 200, and updates nothing.
+          images=$(printf '%s\n' "$IMAGE_TAGS" \
+            | grep -v '^[[:space:]]*$' \
+            | sed "s|^${REGISTRY}/|${PUBLIC_REGISTRY}/|" \
+            | paste -sd, -)
+          echo "Notifying Watchtower to update: $images"
+          curl -fsS --retry 3 --retry-delay 5 --retry-connrefused -X POST \
+            -H "Authorization: Bearer ${WATCHTOWER_HTTP_API_TOKEN}" \
+            "${WATCHTOWER_URL}/v1/update?image=${images}"

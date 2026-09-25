@@ -1,0 +1,13 @@
+target
+site/node_modules
+site/src
+site/public
+site/coverage
+data
+db
+docs
+homebox
+homebox-backup
+.git
+.github
+.superpowers
