@@ -27,4 +27,16 @@ describe('HomePage', () => {
       expect(screen.getByText(label)).toBeInTheDocument();
     }
   });
+
+  it('shows an error state instead of endless loading skeletons when the query fails', async () => {
+    render(
+      <MockedProvider mocks={[{ request: { query: GET_SUMMARY }, error: new Error('boom') }]}>
+        <HomePage />
+      </MockedProvider>,
+    );
+
+    expect(await screen.findByText('Could not load statistics.')).toBeInTheDocument();
+    expect(screen.getAllByText('unavailable')).toHaveLength(4);
+    expect(screen.queryByLabelText(/ loading$/)).not.toBeInTheDocument();
+  });
 });

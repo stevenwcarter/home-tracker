@@ -10,5 +10,5 @@ interface SummaryResponse {
 export const useSummary = () => {
   const { data, loading, error } = useQuery<SummaryResponse>(GET_SUMMARY);
   useErrorToast(error, 'Error loading summary');
-  return { summary: data?.summary ?? null, loading };
+  return { summary: data?.summary ?? null, loading, error };
 };

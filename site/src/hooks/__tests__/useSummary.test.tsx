@@ -42,4 +42,11 @@ describe('useSummary', () => {
     expect(result.current.summary).toBeNull();
     expect(toast.error).toHaveBeenCalledWith('Error loading summary');
   });
+
+  it('exposes the error', async () => {
+    const mocks = [{ request: { query: GET_SUMMARY }, error: new Error('boom') }];
+    const { result } = renderHook(() => useSummary(), { wrapper: wrapper(mocks) });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.error).toBeInstanceOf(Error);
+  });
 });
