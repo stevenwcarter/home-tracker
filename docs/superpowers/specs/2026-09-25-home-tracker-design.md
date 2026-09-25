@@ -386,9 +386,8 @@ Reading order and mapping (Homebox column → ours):
 6. `tag_entities.json`: upsert pairs.
 7. `attachments.json`: rows with `type = "thumbnail"` are skipped as attachments.
    For every other row: copy `attachments/<id>` into `$DATA_DIR/originals/` under
-   its SHA-256 (computed while copying; the Homebox `path` also ends in that hash
-   and the two are checked to agree, mismatches are logged and ours wins), record
-   `size_bytes`, upsert the row. If the row's `attachment_thumbnail` points at a
+   its SHA-256, computed while copying. Homebox's `path` column is an opaque
+   storage key and is ignored. Record `size_bytes`, upsert the row. If the row's `attachment_thumbnail` points at a
    thumbnail row whose blob exists, store that blob as the `500` variant with the
    decoded dimensions.
 8. `maintenance_entries.json`, `notifiers.json`: counted and warned about, not read.

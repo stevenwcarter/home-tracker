@@ -10,7 +10,7 @@ use home_tracker::asset_id::AssetId;
 use home_tracker::db::{ITEM_TYPE_ID, LOCATION_TYPE_ID, TestDb};
 use home_tracker::import::report::{ImportReport, TableCounts};
 use home_tracker::import::run::import_backup;
-use home_tracker::import::source::{self, DirSource};
+use home_tracker::import::source::{self, DirSource, Source};
 use home_tracker::kinds::{AttachmentKind, FieldKind};
 use home_tracker::models::{Attachment, Entity, EntityTemplate, EntityType, TemplateField};
 use home_tracker::money::Cents;
@@ -98,6 +98,16 @@ fn row_counts(conn: &mut SqliteConnection) -> Vec<i64> {
         attachments::table.count().get_result(conn).unwrap(),
         thumbnails::table.count().get_result(conn).unwrap(),
     ]
+}
+
+/// The sorted file names directly inside `dir`.
+fn dir_names(dir: &Path) -> Vec<String> {
+    let mut names: Vec<String> = fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
 }
 
 fn all_entities(conn: &mut SqliteConnection) -> Vec<Entity> {
@@ -384,20 +394,111 @@ fn write_mini_backup_to_target_dir() {
 }
 
 #[test]
-fn a_path_hash_mismatch_is_a_warning_not_an_error() {
+fn the_homebox_path_is_ignored() {
     let h = Harness::new();
     let photo_id = h.ids.photo.clone();
     h.edit_table("attachments", |rows| {
-        Harness::row(rows, &photo_id)["path"] = "group-1/documents/deadbeef".into();
+        Harness::row(rows, &photo_id)["path"] = "bogus/path".into();
     });
     let report = h.import().unwrap();
     let photo = svc::attachment::get(&mut h.conn(), &h.ids.photo)
         .unwrap()
         .unwrap();
     assert_eq!(photo.sha256, h.ids.jpeg_sha256);
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert!(report.warnings[0].contains("maintenance"));
+}
+
+#[test]
+fn an_attachment_id_with_path_separators_is_skipped() {
+    let h = Harness::new();
+    let manual_id = h.ids.manual.clone();
+    let evil = "../../etc/passwd";
+    h.edit_table("attachments", |rows| {
+        Harness::row(rows, &manual_id)["id"] = evil.into();
+    });
+    let report = h.import().unwrap();
+    let mut conn = h.conn();
+    assert!(svc::attachment::get(&mut conn, evil).unwrap().is_none());
     assert!(
-        report.warnings.iter().any(|w| w.contains(&h.ids.photo)),
+        svc::attachment::get(&mut conn, &h.ids.photo)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(counts(&report, "attachments").skipped, 1);
+    // Rejected by name, not merely "no blob": the traversal target is never read.
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains(evil) && w.contains("not a plain file name")),
         "{:?}",
         report.warnings
     );
+    // Only the photo's original was written, and nothing else under the data dir.
+    assert_eq!(dir_names(h.data.path()), ["originals"]);
+    assert_eq!(
+        dir_names(&h.data.path().join("originals")),
+        [h.ids.jpeg_sha256.as_str()]
+    );
+}
+
+#[test]
+fn sources_refuse_attachment_ids_that_are_paths() {
+    let h = Harness::new();
+    let mut dir = DirSource::new(h.backup.path());
+    let zip_dir = tempfile::tempdir().unwrap();
+    let zip_path = zip_dir.path().join("backup.zip");
+    MiniBackup::write_zip(&zip_path);
+    let mut zip = source::open(&zip_path).unwrap();
+    for id in ["", "..", "../manifest.json", "a/b", "a\\b"] {
+        assert!(dir.read_attachment(id).is_err(), "dir accepted {id:?}");
+        assert!(zip.read_attachment(id).is_err(), "zip accepted {id:?}");
+    }
+}
+
+#[test]
+fn a_photo_whose_thumbnail_blob_is_missing_still_imports() {
+    let h = Harness::new();
+    fs::remove_file(h.backup.path().join("attachments").join(&h.ids.thumb)).unwrap();
+    let report = h.import().unwrap();
+    let mut conn = h.conn();
+    let photo = svc::attachment::get(&mut conn, &h.ids.photo)
+        .unwrap()
+        .unwrap();
+    assert_eq!(photo.sha256, h.ids.jpeg_sha256);
+    assert!(
+        svc::attachment::thumbnail(&mut conn, &h.ids.photo, 500)
+            .unwrap()
+            .is_none()
+    );
+    let naming_thumb = report
+        .warnings
+        .iter()
+        .filter(|w| w.contains(&h.ids.thumb))
+        .count();
+    assert_eq!(naming_thumb, 1, "{:?}", report.warnings);
+}
+
+#[test]
+fn zip_with_a_single_top_level_folder_is_accepted() {
+    let zips = tempfile::tempdir().unwrap();
+    let import_zip = |path: &Path| {
+        let db = TestDb::new();
+        let data = tempfile::tempdir().unwrap();
+        let mut conn = db.pool.get().unwrap();
+        let mut source = source::open(path).unwrap();
+        import_backup(&mut conn, source.as_mut(), data.path()).unwrap();
+        all_entities(&mut conn)
+            .into_iter()
+            .map(|e| e.id)
+            .collect::<Vec<_>>()
+    };
+    let plain = zips.path().join("plain.zip");
+    MiniBackup::write_zip(&plain);
+    let nested = zips.path().join("nested.zip");
+    MiniBackup::write_zip_with_prefix(&nested, "homebox-backup/");
+    let plain_ids = import_zip(&plain);
+    assert_eq!(plain_ids.len(), 4);
+    assert_eq!(import_zip(&nested), plain_ids);
 }

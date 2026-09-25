@@ -18,7 +18,7 @@ use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 
 use super::report::{ImportReport, TableCounts};
-use super::source::Source;
+use super::source::{Source, is_plain_attachment_id};
 use super::tables::{
     AttachmentRow, EntityFieldRow, EntityRow, EntityTemplateRow, EntityTypeRow, Manifest,
     TagEntityRow, TagRow, TemplateFieldRow, parse_date, parse_timestamp,
@@ -606,6 +606,11 @@ fn import_attachments(
 
     for row in files {
         let what = format!("attachment {}", row.id);
+        if !is_plain_attachment_id(&row.id) {
+            report.warn(format!("{what}: id is not a plain file name; skipped"));
+            report.counts("attachments").skipped += 1;
+            continue;
+        }
         let Some(entity_id) = row
             .entity_attachments
             .as_ref()
@@ -632,12 +637,6 @@ fn import_attachments(
             continue;
         };
         let sha256 = hex::encode(Sha256::digest(&bytes));
-        if !row.path.ends_with(&sha256) {
-            report.warn(format!(
-                "{what}: Homebox path {:?} does not end with the blob's sha256 {sha256}; using the computed hash",
-                row.path
-            ));
-        }
         if store_original(originals_dir, &sha256, &bytes)? {
             report.originals_written += 1;
         }
@@ -691,6 +690,13 @@ fn import_thumbnail(
         ));
         return Ok(());
     };
+    if !is_plain_attachment_id(&thumb.id) {
+        report.warn(format!(
+            "thumbnail {} of attachment {attachment_id}: id is not a plain file name; no thumbnail stored",
+            thumb.id
+        ));
+        return Ok(());
+    }
     let Some(data) = source.read_attachment(&thumb.id)? else {
         report.warn(format!(
             "thumbnail {} of attachment {attachment_id} has no blob in the backup; no thumbnail stored",
