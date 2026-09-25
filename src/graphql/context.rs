@@ -1,5 +1,8 @@
 //! Per-request GraphQL context and the authorization seam.
 
+use anyhow::Context as _;
+use diesel::SqliteConnection;
+use diesel::r2d2::{ConnectionManager, PooledConnection};
 use juniper::{FieldError, FieldResult};
 
 use crate::db::SqlitePool;
@@ -42,6 +45,13 @@ impl juniper::Context for GraphQLContext {}
 impl GraphQLContext {
     pub fn new(pool: SqlitePool, actor: Actor) -> Self {
         Self { pool, actor }
+    }
+
+    /// One pooled connection for the duration of a resolver.
+    pub fn conn(&self) -> anyhow::Result<PooledConnection<ConnectionManager<SqliteConnection>>> {
+        self.pool
+            .get()
+            .context("could not get a database connection")
     }
 
     /// The single gate every mutation calls first.

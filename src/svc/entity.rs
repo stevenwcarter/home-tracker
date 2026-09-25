@@ -7,6 +7,7 @@ use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_types::Text;
 
+use crate::graphql::context::GraphQLContext;
 use crate::models::Entity;
 use crate::schema::{entities, entity_types};
 
@@ -14,7 +15,8 @@ use crate::schema::{entities, entity_types};
 const MAX_DEPTH: usize = 64;
 
 /// A location with its nested sub-locations (items are not part of the tree).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, juniper::GraphQLObject)]
+#[graphql(context = GraphQLContext)]
 pub struct LocationNode {
     pub entity: Entity,
     pub children: Vec<LocationNode>,
