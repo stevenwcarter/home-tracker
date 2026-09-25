@@ -1,1 +1,17 @@
 /target
+/data
+/db
+*.sqlite
+*.sqlite-*
+lcov*
+cobertura.xml
+.env
+.env.*
+!env.prod
+node_modules
+site/build
+site/coverage
+site/.vite
+*.log
+.DS_Store
+.worktrees/
