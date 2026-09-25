@@ -992,6 +992,7 @@ dependencies = [
  "serde_json",
  "socket2",
  "tempfile",
+ "thiserror",
  "tikv-jemallocator",
  "tokio",
  "tower",

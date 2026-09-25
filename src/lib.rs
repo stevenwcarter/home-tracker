@@ -1,10 +1,13 @@
 #![warn(clippy::str_to_string)]
 
 pub mod api;
+pub mod asset_id;
 pub mod config;
 pub mod db;
 pub mod graphql;
 pub mod healthcheck;
+pub mod kinds;
+pub mod money;
 pub mod net;
 pub mod routes;
 pub mod schema;
