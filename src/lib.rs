@@ -1,8 +1,11 @@
 #![warn(clippy::str_to_string)]
 
+pub mod api;
 pub mod config;
 pub mod db;
+pub mod graphql;
 pub mod net;
+pub mod routes;
 pub mod schema;
 pub mod svc;
 

@@ -39,10 +39,7 @@ async fn main() -> Result<()> {
     let config = Config::from_env()?;
 
     match cli.command.unwrap_or(Command::Serve) {
-        Command::Serve => {
-            tracing::info!(?config, "serve: not implemented yet");
-            Ok(())
-        }
+        Command::Serve => serve(config).await,
         Command::Import { path } => {
             tracing::info!(?path, "import: not implemented yet");
             Ok(())
@@ -55,4 +52,31 @@ async fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+async fn serve(config: Config) -> Result<()> {
+    use anyhow::Context as _;
+    use home_tracker::{db, net, routes};
+
+    let pool = db::build_pool(&config.database_url)?;
+    {
+        let mut conn = pool.get().context("connection for migrations")?;
+        db::run_migrations(&mut conn)?;
+        tracing::info!("migrations applied");
+    }
+    std::fs::create_dir_all(config.data_dir.join("originals"))
+        .with_context(|| format!("could not create {}", config.data_dir.display()))?;
+
+    let addr = net::listen_addr(&config.listen_address, config.port)?;
+    let listener = tokio::net::TcpListener::from_std(net::bind(addr)?)
+        .context("registering the listener with tokio")?;
+    tracing::info!(%addr, dual_stack = addr.is_ipv6(), "listening");
+
+    axum::serve(listener, routes::app(pool))
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutting down");
+        })
+        .await
+        .context("server error")
 }

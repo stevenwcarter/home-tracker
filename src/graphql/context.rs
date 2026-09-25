@@ -1,0 +1,90 @@
+//! Per-request GraphQL context and the authorization seam.
+
+use juniper::{FieldError, FieldResult};
+
+use crate::db::SqlitePool;
+
+/// What a user may do. v1 has no users; the enum exists so mutations gate on it now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    ReadOnly,
+    Write,
+}
+
+/// Who is making the request. Auth will replace `Anonymous` with `User`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Actor {
+    /// No authentication configured. Has full access in v1.
+    Anonymous,
+    User {
+        id: String,
+        role: Role,
+    },
+}
+
+impl Actor {
+    pub fn can_write(&self) -> bool {
+        match self {
+            Self::Anonymous => true,
+            Self::User { role, .. } => *role == Role::Write,
+        }
+    }
+}
+
+#[derive(Clone)]
+pub struct GraphQLContext {
+    pub pool: SqlitePool,
+    pub actor: Actor,
+}
+
+impl juniper::Context for GraphQLContext {}
+
+impl GraphQLContext {
+    pub fn new(pool: SqlitePool, actor: Actor) -> Self {
+        Self { pool, actor }
+    }
+
+    /// The single gate every mutation calls first.
+    pub fn require_write(&self) -> FieldResult<()> {
+        if self.actor.can_write() {
+            Ok(())
+        } else {
+            Err(FieldError::new(
+                "Forbidden: write access required",
+                juniper::Value::null(),
+            ))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::TestDb;
+
+    #[test]
+    fn anonymous_can_write_in_v1() {
+        assert!(Actor::Anonymous.can_write());
+    }
+
+    #[test]
+    fn read_only_users_are_refused() {
+        let db = TestDb::new();
+        let ctx = GraphQLContext::new(
+            db.pool.clone(),
+            Actor::User {
+                id: "u1".to_owned(),
+                role: Role::ReadOnly,
+            },
+        );
+        assert!(ctx.require_write().is_err());
+        let ctx = GraphQLContext::new(
+            db.pool,
+            Actor::User {
+                id: "u1".to_owned(),
+                role: Role::Write,
+            },
+        );
+        assert!(ctx.require_write().is_ok());
+    }
+}
