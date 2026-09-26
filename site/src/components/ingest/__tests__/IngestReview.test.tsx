@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { ReactNode } from 'react';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import { MockedProvider } from '@apollo/client/testing/react';
+import type { MockedResponse } from '@apollo/client/testing';
+import { useApolloClient } from '@apollo/client/react';
+import { GET_TAGS } from 'hooks/queries';
 import { MemoryRouter } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
 import { IngestReview } from '../IngestReview';
@@ -69,12 +72,27 @@ const DRILL = ingestItem({
 const batch = (items = [ingestItem({ id: 'i1', status: 'ACCEPTED' }), DRILL]): IngestBatch =>
   ingestBatch({ id: 'b1', parentId: 'garage', status: 'REVIEWING', items });
 
+/** Refetches every active `GetTags`, as the TagPicker's tag creation does. */
+const TagsRefetcher = () => {
+  const client = useApolloClient();
+  return (
+    <button type="button" onClick={() => void client.refetchQueries({ include: ['GetTags'] })}>
+      Refetch tags
+    </button>
+  );
+};
+
 /** Rendered with a wrapper, so `rerender` can hand it a changed batch. */
-const renderReview = (value: IngestBatch = batch()) => {
-  const mocks = [typesMock(TYPES), tagsMock(), locationsMock()];
+const renderReview = (
+  value: IngestBatch = batch(),
+  mocks: MockedResponse[] = [typesMock(TYPES), tagsMock(), locationsMock()],
+) => {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <MockedProvider mocks={mocks}>
-      <MemoryRouter>{children}</MemoryRouter>
+      <MemoryRouter>
+        {children}
+        <TagsRefetcher />
+      </MemoryRouter>
     </MockedProvider>
   );
   return render(<IngestReview batch={value} />, { wrapper });
@@ -175,6 +193,27 @@ describe('IngestReview', () => {
       { photoId: 'front', kind: 'PHOTO' },
       { photoId: 'receipt', kind: 'WARRANTY' },
     ]);
+  });
+
+  // A household with no tags yet refetches `GetTags` with an empty list while
+  // the TagPicker creates one; that refetch must not remount the form.
+  it('keeps the edits across a GetTags refetch', async () => {
+    const user = userEvent.setup();
+    const refetched = vi.fn(() => ({ data: { tags: [] } }));
+    renderReview(batch(), [
+      typesMock(TYPES),
+      tagsMock([]),
+      { request: { query: GET_TAGS }, result: refetched, delay: 50, maxUsageCount: 2 },
+      locationsMock(),
+    ]);
+    await form();
+    await user.clear(screen.getByLabelText('Name'));
+    await user.type(screen.getByLabelText('Name'), 'My drill');
+    await user.click(screen.getByRole('button', { name: 'Refetch tags' }));
+    // Past the refetch's delay, so a remount would have happened by now.
+    await act(() => new Promise((resolve) => setTimeout(resolve, 100)));
+    expect(refetched).toHaveBeenCalled();
+    expect(screen.getByLabelText('Name')).toHaveValue('My drill');
   });
 
   it('Skip skips the item', async () => {

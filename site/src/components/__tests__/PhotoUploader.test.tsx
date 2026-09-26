@@ -139,4 +139,29 @@ describe('PhotoUploader', () => {
     expect(upload).not.toHaveBeenCalled();
     expect(toast.error).toHaveBeenCalledWith('Wait for the current upload to finish');
   });
+
+  it('reports when a batch starts and stops uploading, and on unmount mid-upload', () => {
+    const onUploadingChange = vi.fn();
+    const ui = () => (
+      <PhotoUploader target={DRILL} onUploadingChange={onUploadingChange}>
+        <p>gallery goes here</p>
+      </PhotoUploader>
+    );
+    const { rerender, unmount } = render(ui());
+    expect(onUploadingChange).not.toHaveBeenCalled();
+
+    hookState.uploading = true;
+    rerender(ui());
+    expect(onUploadingChange).toHaveBeenLastCalledWith(true);
+
+    hookState.uploading = false;
+    rerender(ui());
+    expect(onUploadingChange).toHaveBeenLastCalledWith(false);
+
+    hookState.uploading = true;
+    rerender(ui());
+    onUploadingChange.mockClear();
+    unmount();
+    expect(onUploadingChange).toHaveBeenCalledWith(false);
+  });
 });

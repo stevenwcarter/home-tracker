@@ -16,7 +16,7 @@ import { nextReviewable } from 'utils/ingest';
 const TITLE = 'Add items with AI';
 
 /** The screen for where the batch stands. */
-const Stage = ({ batch, back }: { batch: IngestBatch; back: BackLink }) => {
+const Stage = ({ batch, back }: { batch: IngestBatch; back: BackLink | null }) => {
   switch (batch.status) {
     case 'COLLECTING':
       return <IngestCollect batch={batch} back={back} />;
@@ -47,23 +47,27 @@ export const IngestPage = () => {
   const { batchId = '' } = useParams();
   const { batch, loading, notFound } = useIngestBatch(batchId);
   const parentId = batch?.parentId ?? null;
-  const { entity: parent } = useEntity(parentId ?? '', { skip: parentId === null });
+  const { entity: parent, loading: parentLoading } = useEntity(parentId ?? '', {
+    skip: parentId === null,
+  });
 
   if (loading && !batch) return <PageSkeleton label="Loading batch" />;
   if (notFound) return <NotFound what="batch" />;
   if (!batch) return <p className="text-danger">Could not load this batch.</p>;
 
-  const back: BackLink = parent
-    ? { name: parent.name, path: entityPath(parent) }
-    : // Until the parent loads, its page is still the right place to go back to.
-      {
-        name: parentId ? 'where you started' : 'Home',
-        path: parentId ? `/locations/${parentId}` : '/',
-      };
+  // Only once the parent is known: its page's path depends on whether it is a
+  // location or an item. A batch with no parent, or one whose parent is gone,
+  // leads home.
+  const back: BackLink | null =
+    parentId !== null && parentLoading && !parent
+      ? null
+      : parent
+        ? { name: parent.name, path: entityPath(parent) }
+        : { name: 'Home', path: '/' };
 
   return (
     <section>
-      <Breadcrumbs trail={parent ? [...parent.ancestors, parent] : []} current={TITLE} />
+      {back && <Breadcrumbs trail={parent ? [...parent.ancestors, parent] : []} current={TITLE} />}
       <h1 className="mt-4">{TITLE}</h1>
       <Stage batch={batch} back={back} />
     </section>

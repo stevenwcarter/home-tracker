@@ -85,17 +85,16 @@ const ReadyItem = ({
     Object.fromEntries(item.photos.map((photo) => [photo.id, kindOfPhoto(photo)])),
   );
   const suggestion = item.suggestion;
-
-  // The form reads its input once on mount, so wait for the type and tag lookups.
-  if ((typesLoading && entityTypes.length === 0) || (tagsLoading && tags.length === 0)) {
-    return <PageSkeleton label="Loading form" />;
+  // The form reads its input once on mount, so the input is fixed the first
+  // time both lookups have landed. Later refetches (a tag created from the
+  // TagPicker sets `loading` again) must not unmount the form mid-edit.
+  const [initialInput, setInitialInput] = useState<EntityInput | null>(null);
+  if (initialInput === null && !typesLoading && !tagsLoading) {
+    setInitialInput(
+      suggestionToInput(suggestion, { typeId: itemType(entityTypes)?.id ?? '', parentId, tags }),
+    );
   }
-
-  const initialInput = suggestionToInput(suggestion, {
-    typeId: itemType(entityTypes)?.id ?? '',
-    parentId,
-    tags,
-  });
+  if (initialInput === null) return <PageSkeleton label="Loading form" />;
 
   const save = (input: EntityInput) =>
     void acceptItem(

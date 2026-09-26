@@ -142,6 +142,32 @@ describe('IngestPage', () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
+  it('shows no breadcrumb or back link until the parent has loaded', async () => {
+    const done = ingestBatch({
+      id: 'b1',
+      status: 'DONE',
+      items: [ingestItem({ id: 'i1', status: 'SKIPPED' })],
+    });
+    renderRoute('/ingest/b1', [batchMock(done), { ...entityMock('garage', garage), delay: 200 }]);
+    expect(await screen.findByRole('button', { name: 'Add more items' })).toBeInTheDocument();
+    expect(screen.queryByRole('navigation', { name: 'Breadcrumb' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /Back to/ })).not.toBeInTheDocument();
+    expect(await screen.findByRole('link', { name: 'Back to Garage' })).toHaveAttribute(
+      'href',
+      '/locations/garage',
+    );
+  });
+
+  it('leads home when the parent no longer exists', async () => {
+    const done = ingestBatch({
+      id: 'b1',
+      status: 'DONE',
+      items: [ingestItem({ id: 'i1', status: 'SKIPPED' })],
+    });
+    renderRoute('/ingest/b1', [batchMock(done), entityMock('garage', null)]);
+    expect(await screen.findByRole('link', { name: 'Back to Home' })).toHaveAttribute('href', '/');
+  });
+
   it('shows Not found for an unknown batch', async () => {
     renderRoute('/ingest/nope', [batchMock(null, 'nope')]);
     expect(await screen.findByRole('heading', { level: 1, name: 'Not found' })).toBeInTheDocument();

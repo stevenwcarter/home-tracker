@@ -12,6 +12,8 @@ interface IngestItemGroupProps {
   removable: boolean;
   onRemoveItem: (item: IngestItem) => void;
   onRemovePhoto: (photoId: string) => void;
+  /** Whether this item's uploader has files in flight. */
+  onUploadingChange: (itemId: string, uploading: boolean) => void;
   /** Disables the remove buttons while an ingest write runs. */
   busy: boolean;
 }
@@ -27,6 +29,7 @@ export const IngestItemGroup = ({
   removable,
   onRemoveItem,
   onRemovePhoto,
+  onUploadingChange,
   busy,
 }: IngestItemGroupProps) => {
   const headingId = useId();
@@ -49,7 +52,11 @@ export const IngestItemGroup = ({
         )}
       </div>
       {/* Keyed, so an item's upload status never shows under another item. */}
-      <PhotoUploader key={item.id} target={{ kind: 'ingestItem', itemId: item.id }}>
+      <PhotoUploader
+        key={item.id}
+        target={{ kind: 'ingestItem', itemId: item.id }}
+        onUploadingChange={(uploading) => onUploadingChange(item.id, uploading)}
+      >
         {item.photos.length > 0 ? (
           <ul
             aria-label={`Photos of ${label}`}

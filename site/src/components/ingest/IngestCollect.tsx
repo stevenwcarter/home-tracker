@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useCallback, useId, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { DANGER_ACTION, PRIMARY_ACTION, SECONDARY_ACTION } from 'components/buttonStyles';
 import { ConfirmDialog } from 'components/ConfirmDialog';
@@ -11,14 +11,29 @@ import { IngestItemGroup } from './IngestItemGroup';
 /**
  * The collecting screen: one group per future entity, "Next item" to start
  * another, "Submit for analysis" once any photo is staged, and "Discard
- * batch" (confirmed) to throw the whole batch away and go `back`.
+ * batch" (confirmed) to throw the whole batch away and go `back` (home while the parent is still loading).
  */
-export const IngestCollect = ({ batch, back }: { batch: IngestBatch; back: BackLink }) => {
+export const IngestCollect = ({ batch, back }: { batch: IngestBatch; back: BackLink | null }) => {
   const { addItem, removeItem, removePhoto, submit, deleteBatch, loading } = useIngestMutations();
   const navigate = useNavigate();
+  const waitingId = useId();
   const [doomed, setDoomed] = useState<{ item: IngestItem; label: string } | null>(null);
   const [discarding, setDiscarding] = useState(false);
+  // Items whose uploader has files in flight: submitting now would drop them
+  // (an item still empty is deleted, and a late photo is refused with 409).
+  const [uploadingItems, setUploadingItems] = useState<ReadonlySet<string>>(new Set());
   const { photos } = batchCounts(batch);
+  const uploading = uploadingItems.size > 0;
+
+  const onUploadingChange = useCallback((itemId: string, active: boolean) => {
+    setUploadingItems((previous) => {
+      if (previous.has(itemId) === active) return previous;
+      const next = new Set(previous);
+      if (active) next.add(itemId);
+      else next.delete(itemId);
+      return next;
+    });
+  }, []);
 
   const askToRemove = (item: IngestItem, label: string) => {
     // An empty item costs nothing to lose; one with photos is confirmed.
@@ -33,7 +48,7 @@ export const IngestCollect = ({ batch, back }: { batch: IngestBatch; back: BackL
   };
 
   const discard = async () => {
-    if (await deleteBatch(batch.id)) navigate(back.path);
+    if (await deleteBatch(batch.id)) navigate(back?.path ?? '/');
     else setDiscarding(false);
   };
 
@@ -52,6 +67,7 @@ export const IngestCollect = ({ batch, back }: { batch: IngestBatch; back: BackL
               removable={batch.items.length > 1}
               onRemoveItem={(target) => askToRemove(target, `Item ${index + 1}`)}
               onRemovePhoto={(id) => void removePhoto(id)}
+              onUploadingChange={onUploadingChange}
               busy={loading}
             />
           </li>
@@ -69,7 +85,8 @@ export const IngestCollect = ({ batch, back }: { batch: IngestBatch; back: BackL
         <button
           type="button"
           onClick={() => void submit(batch.id)}
-          disabled={photos === 0 || loading}
+          disabled={photos === 0 || uploading || loading}
+          aria-describedby={uploading ? waitingId : undefined}
           className={PRIMARY_ACTION}
         >
           Submit for analysis
@@ -82,6 +99,11 @@ export const IngestCollect = ({ batch, back }: { batch: IngestBatch; back: BackL
         >
           Discard batch
         </button>
+        {uploading && (
+          <span id={waitingId} role="status" className="text-sm text-muted">
+            Waiting for uploads to finish
+          </span>
+        )}
       </div>
       <ConfirmDialog
         open={doomed !== null}

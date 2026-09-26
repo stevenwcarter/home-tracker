@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, waitFor, within } from '@testing-library/react';
+import { act, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { IngestCollect } from '../IngestCollect';
 import { renderWithApollo } from 'test/formFixtures';
@@ -166,6 +166,35 @@ describe('IngestCollect', () => {
     const file = new File(['jpeg'], 'drill.jpg', { type: 'image/jpeg' });
     await user.upload(within(group('Item 2')).getByLabelText('Camera photo'), file);
     await waitFor(() => expect(urls).toContain('/api/ingest/items/i2/photos'));
+  });
+
+  it('"Submit for analysis" waits while any item is still uploading', async () => {
+    let release: (response: Response) => void = () => {};
+    vi.mocked(fetch).mockImplementation(
+      () => new Promise<Response>((resolve) => (release = resolve)),
+    );
+    const user = userEvent.setup();
+    renderCollect();
+    const submitButton = screen.getByRole('button', { name: 'Submit for analysis' });
+    expect(submitButton).toBeEnabled();
+
+    const file = new File(['jpeg'], 'drill.jpg', { type: 'image/jpeg' });
+    await user.upload(within(group('Item 3')).getByLabelText('Camera photo'), file);
+    expect(await screen.findByText('Waiting for uploads to finish')).toBeInTheDocument();
+    expect(submitButton).toBeDisabled();
+    await user.click(submitButton);
+    expect(mutations.submit).not.toHaveBeenCalled();
+
+    await act(async () => {
+      release(
+        new Response(JSON.stringify({ id: 'new' }), {
+          status: 201,
+          headers: { 'content-type': 'application/json' },
+        }),
+      );
+    });
+    await waitFor(() => expect(submitButton).toBeEnabled());
+    expect(screen.queryByText('Waiting for uploads to finish')).not.toBeInTheDocument();
   });
 
   it('lays the photos out in a wrapping grid with no fixed widths (phone width)', () => {

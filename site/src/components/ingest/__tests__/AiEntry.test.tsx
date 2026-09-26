@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { act, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MockedProvider } from '@apollo/client/testing/react';
 import type { MockedResponse } from '@apollo/client/testing';
@@ -51,6 +51,18 @@ describe('AiEntry', () => {
     expect(mutations.createBatch).toHaveBeenCalledWith('garage');
     expect(await screen.findByTestId('current-path')).toHaveTextContent('/ingest/b9');
     expect(screen.queryByRole('link', { name: 'Set up AI' })).not.toBeInTheDocument();
+  });
+
+  it('a double tap starts one batch', async () => {
+    let resolve: (batch: unknown) => void = () => {};
+    mutations.createBatch.mockReturnValue(new Promise((done) => (resolve = done)));
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    renderEntry([aiSettingsMock(), openMock([])]);
+    const button = await screen.findByRole('button', { name: 'Add item(s) with AI' });
+    await user.dblClick(button);
+    expect(mutations.createBatch).toHaveBeenCalledTimes(1);
+    await act(async () => resolve(ingestBatch({ id: 'b9' })));
+    expect(await screen.findByTestId('current-path')).toHaveTextContent('/ingest/b9');
   });
 
   it('stays put when the batch could not be started', async () => {

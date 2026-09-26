@@ -1,10 +1,10 @@
-import { Link, useNavigate } from 'react-router-dom';
+import { Link } from 'react-router-dom';
 import { SECONDARY_ACTION } from 'components/buttonStyles';
 import { useAiSettings } from 'hooks/useAiSettings';
-import { useIngestMutations } from 'hooks/useIngestMutations';
 import { useOpenIngestBatches } from 'hooks/useOpenIngestBatches';
 import { timeAgo } from 'utils/date';
 import { plural } from 'utils/plural';
+import { useStartBatch } from './useStartBatch';
 
 /**
  * The way into AI ingest from an entity's page: "Add item(s) with AI" (start
@@ -15,22 +15,15 @@ import { plural } from 'utils/plural';
 export const AiEntry = ({ parentId }: { parentId: string }) => {
   const { settings } = useAiSettings();
   const { batches } = useOpenIngestBatches(parentId);
-  const { createBatch, loading } = useIngestMutations();
-  const navigate = useNavigate();
-
-  const start = async () => {
-    const batch = await createBatch(parentId);
-    // On failure the hook has toasted; stay on the page.
-    if (batch) navigate(`/ingest/${batch.id}`);
-  };
+  const { start, starting } = useStartBatch();
 
   return (
     <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-2">
       {settings?.hasApiKey ? (
         <button
           type="button"
-          onClick={() => void start()}
-          disabled={loading}
+          onClick={() => void start(parentId)}
+          disabled={starting}
           className={SECONDARY_ACTION}
         >
           Add item(s) with AI

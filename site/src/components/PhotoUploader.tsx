@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { ChangeEvent, DragEvent, ReactNode, useRef, useState } from 'react';
+import { ChangeEvent, DragEvent, ReactNode, useEffect, useRef, useState } from 'react';
 import { toast } from 'react-toastify';
 import { UploadProgress, UploadStatus, UploadTarget, useUploadPhoto } from 'hooks/useUploadPhoto';
 import { SECONDARY_ACTION } from './buttonStyles';
@@ -42,11 +42,24 @@ const StatusRow = ({ entry }: { entry: UploadProgress }) => (
 export const PhotoUploader = ({
   target,
   children,
+  onUploadingChange,
 }: {
   target: UploadTarget;
   children?: ReactNode;
+  /** Told `true` when a batch of files starts uploading and `false` when it ends (or on unmount). */
+  onUploadingChange?: (uploading: boolean) => void;
 }) => {
   const { upload, uploading, progress } = useUploadPhoto(target);
+  // Read through a ref, so a new callback identity each render doesn't re-run the effect.
+  const onUploadingChangeRef = useRef(onUploadingChange);
+  useEffect(() => {
+    onUploadingChangeRef.current = onUploadingChange;
+  }, [onUploadingChange]);
+  useEffect(() => {
+    if (!uploading) return;
+    onUploadingChangeRef.current?.(true);
+    return () => onUploadingChangeRef.current?.(false);
+  }, [uploading]);
   const inputRef = useRef<HTMLInputElement>(null);
   const cameraRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
