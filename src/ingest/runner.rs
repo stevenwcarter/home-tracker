@@ -197,17 +197,18 @@ impl IngestRunner {
     }
 
     /// Analyses `item_ids` of batch `batch_id` concurrently, settling the
-    /// batch as each finishes. An item whose task fails is marked failed.
+    /// batch as each finishes and once more at the end. An item whose task
+    /// fails is marked failed. A failing step never cuts the other items
+    /// short (dropping the set would abort them mid-analysis): it is logged,
+    /// and the first such error is returned once every item is done.
     async fn run_items(self: &Arc<Self>, batch_id: &str, item_ids: Vec<String>) -> Result<()> {
-        if item_ids.is_empty() {
-            return self.settle(batch_id).await;
-        }
         let mut tasks = Tasks::default();
         for item_id in item_ids {
             let runner = Arc::clone(self);
             let id = item_id.clone();
             tasks.spawn(item_id, async move { runner.analyse_item(&id).await });
         }
+        let mut first_error = None;
         while let Some((item_id, result)) = tasks.next().await {
             if let Err(reason) = result {
                 error!(item = %item_id, "ingest item analysis failed: {reason}");
@@ -215,25 +216,39 @@ impl IngestRunner {
                     error!(item = %item_id, "could not mark the ingest item failed: {err:#}");
                 }
             }
-            self.settle(batch_id).await?;
+            if let Err(err) = self.settle(batch_id).await {
+                error!(batch = %batch_id, "could not settle the ingest batch: {err:#}");
+                first_error.get_or_insert(err);
+            }
         }
-        Ok(())
+        // Covers a run with no items and a settle that failed above.
+        self.settle(batch_id).await?;
+        first_error.map_or(Ok(()), Err)
     }
 
-    /// Describes item `item_id`'s photos that are not described yet, all at
-    /// once, then synthesises its suggestion from every described photo.
+    /// Claims queued item `item_id` (any other status: nothing to do),
+    /// describes its photos that are not described yet, all at once, then
+    /// synthesises its suggestion from every described photo.
     async fn analyse_item(self: Arc<Self>, item_id: &str) -> Result<()> {
         let id = item_id.to_owned();
         let env = self.ai.env.clone();
-        let (batch_id, photos, config) = self
+        let claimed = self
             .db(move |conn| {
-                ingest::set_item_status(conn, &id, IngestItemStatus::Analysing, None)?;
-                let item = ingest::get_item(conn, &id)?
-                    .ok_or(IngestError::NotFound(IngestRecord::Item))?;
+                let Some(item) = ingest::claim_for_analysis(conn, &id)? else {
+                    return Ok(None);
+                };
                 let photos = ingest::photos(conn, &id)?;
-                Ok((item.batch_id, photos, ai_settings::config(conn, &env)?))
+                Ok(Some((
+                    item.batch_id,
+                    photos,
+                    ai_settings::config(conn, &env)?,
+                )))
             })
             .await?;
+        let Some((batch_id, photos, config)) = claimed else {
+            return Ok(());
+        };
+        self.publish(&batch_id, EventKind::Item, item_id);
         let Some(config) = config else {
             return self.fail_not_configured(&batch_id, item_id).await;
         };
@@ -254,15 +269,24 @@ impl IngestRunner {
                     .await
             });
         }
+        // Every photo runs to the end whatever happens to another: the first
+        // error is returned only once the set is drained.
         let mut not_configured = false;
+        let mut first_error = None;
         while let Some((photo_id, result)) = tasks.next().await {
             match result {
                 Ok(outcome) => not_configured |= outcome == PhotoOutcome::NotConfigured,
                 Err(reason) => {
                     error!(photo = %photo_id, "describing an ingest photo failed: {reason}");
-                    self.fail_photo(&batch_id, &photo_id, TASK_FAILED).await?;
+                    if let Err(err) = self.fail_photo(&batch_id, &photo_id, TASK_FAILED).await {
+                        error!(photo = %photo_id, "could not mark the ingest photo failed: {err:#}");
+                        first_error.get_or_insert(err);
+                    }
                 }
             }
+        }
+        if let Some(err) = first_error {
+            return Err(err);
         }
         if not_configured {
             return self.fail_not_configured(&batch_id, item_id).await;
@@ -407,7 +431,7 @@ impl IngestRunner {
         let id = item_id.to_owned();
         self.db(move |conn| {
             conn.transaction(|conn| {
-                ingest::set_item_suggestion(conn, &id, &suggestion)?;
+                ingest::set_item_suggestion(conn, &id, Some(&suggestion))?;
                 ingest::set_item_status(conn, &id, IngestItemStatus::Ready, None)
             })
         })

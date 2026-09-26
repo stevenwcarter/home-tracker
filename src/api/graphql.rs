@@ -49,8 +49,6 @@ async fn handle(
 ) -> JuniperResponse {
     // A fresh context per request, for the actor the router attached
     // (see `api::actor`).
-    let context = GraphQLContext::new(pool, actor, data_dir)
-        .with_ai(ai)
-        .with_ingest(ingest);
+    let context = GraphQLContext::for_request(pool, actor, data_dir, ai, ingest);
     JuniperResponse(request.execute(&*schema, &context).await)
 }

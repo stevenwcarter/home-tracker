@@ -56,18 +56,15 @@ pub struct GraphQLContext {
 impl juniper::Context for GraphQLContext {}
 
 impl GraphQLContext {
-    /// A context with AI disabled ([`AiState::disabled`]) and a runner of
-    /// its own over that disabled state; the router supplies the real ones
-    /// through [`Self::with_ai`] and [`Self::with_ingest`].
-    pub fn new(pool: SqlitePool, actor: Actor, data_dir: impl Into<Arc<Path>>) -> Self {
-        let data_dir: Arc<Path> = data_dir.into();
-        let ai = Arc::new(AiState::disabled());
-        let ingest = IngestRunner::new(
-            pool.clone(),
-            ThumbnailService::new(pool.clone(), data_dir.to_path_buf()),
-            Arc::clone(&ai),
-            IngestEvents::new(),
-        );
+    /// A request's context over the process-wide AI state and ingest runner
+    /// the router shares; nothing is built per request.
+    pub fn for_request(
+        pool: SqlitePool,
+        actor: Actor,
+        data_dir: Arc<Path>,
+        ai: Arc<AiState>,
+        ingest: Arc<IngestRunner>,
+    ) -> Self {
         Self {
             pool,
             actor,
@@ -77,14 +74,19 @@ impl GraphQLContext {
         }
     }
 
-    /// This context with `ai` as its AI state.
-    pub fn with_ai(self, ai: Arc<AiState>) -> Self {
-        Self { ai, ..self }
-    }
-
-    /// This context with `ingest` as its runner.
-    pub fn with_ingest(self, ingest: Arc<IngestRunner>) -> Self {
-        Self { ingest, ..self }
+    /// A context with AI disabled ([`AiState::disabled`]) and a runner of
+    /// its own over that disabled state, for tests of resolvers that need
+    /// neither; the router uses [`Self::for_request`].
+    pub fn new(pool: SqlitePool, actor: Actor, data_dir: impl Into<Arc<Path>>) -> Self {
+        let data_dir: Arc<Path> = data_dir.into();
+        let ai = Arc::new(AiState::disabled());
+        let ingest = IngestRunner::new(
+            pool.clone(),
+            ThumbnailService::new(pool.clone(), data_dir.to_path_buf()),
+            Arc::clone(&ai),
+            IngestEvents::new(),
+        );
+        Self::for_request(pool, actor, data_dir, ai, ingest)
     }
 
     /// One pooled connection for the duration of a resolver.

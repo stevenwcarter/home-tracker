@@ -9,9 +9,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
+use diesel::connection::SimpleConnection;
+use diesel::prelude::*;
 use home_tracker::ai::AiState;
 use home_tracker::ai::client::{
-    AiClient, AiError, ChatRequest, ChatResponse, ContentPart, ResponseFormat, Role,
+    AiClient, AiError, ChatRequest, ChatResponse, ContentPart, Detail, ResponseFormat, Role,
 };
 use home_tracker::ai::env::AiEnv;
 use home_tracker::ai::fake::FakeAiClient;
@@ -21,7 +23,8 @@ use home_tracker::ingest::events::{IngestEvent, IngestEvents};
 use home_tracker::ingest::runner::{DESCRIBE_MAX_TOKENS, IngestRunner, SYNTHESIS_MAX_TOKENS};
 use home_tracker::kinds::{IngestBatchStatus, IngestItemStatus, IngestPhotoStatus};
 use home_tracker::models::{IngestBatch, IngestItem, IngestPhoto};
-use home_tracker::svc::ai_settings::AiConfig;
+use home_tracker::schema::settings;
+use home_tracker::svc::ai_settings::{AiConfig, EXTRA_INSTRUCTIONS_KEY};
 use home_tracker::svc::fixtures::{self, jpeg, seed_sample};
 use home_tracker::svc::thumbnail_service::ThumbnailService;
 use home_tracker::svc::{attachment, ingest};
@@ -72,18 +75,38 @@ impl Fixture {
     /// A submitted batch with one item of `photos` distinct JPEG photos,
     /// their originals on disk.
     fn submitted(&self, photos: u32) -> (IngestBatch, IngestItem) {
+        let (batch, mut items) = self.submitted_items(&[photos]);
+        (batch, items.remove(0))
+    }
+
+    /// A submitted batch with an item per entry of `photos`, each with that
+    /// many distinct JPEG photos, their originals on disk.
+    fn submitted_items(&self, photos: &[u32]) -> (IngestBatch, Vec<IngestItem>) {
         let mut conn = self.db.pool.get().unwrap();
-        let (batch, item) = fixtures::ingest_batch(&mut conn, None);
-        for n in 0..photos {
-            let bytes = jpeg(40 + n, 30);
-            let sha256 = hex::encode(Sha256::digest(&bytes));
-            let path = attachment::original_path(self.data.path(), &sha256);
-            fs::create_dir_all(path.parent().unwrap()).unwrap();
-            fs::write(path, bytes).unwrap();
-            fixtures::ingest_photo(&mut conn, &item.id, &sha256, "image/jpeg");
+        let (batch, first) = fixtures::ingest_batch(&mut conn, None);
+        let mut items = vec![first];
+        while items.len() < photos.len() {
+            items.push(ingest::add_item(&mut conn, &batch.id).unwrap());
+        }
+        let mut seed = 0;
+        for (item, &count) in items.iter().zip(photos) {
+            for _ in 0..count {
+                let bytes = jpeg(40 + seed, 30);
+                seed += 1;
+                let sha256 = hex::encode(Sha256::digest(&bytes));
+                let path = attachment::original_path(self.data.path(), &sha256);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, bytes).unwrap();
+                fixtures::ingest_photo(&mut conn, &item.id, &sha256, "image/jpeg");
+            }
         }
         let batch = ingest::submit(&mut conn, &batch.id).unwrap();
-        (batch, item)
+        (batch, items)
+    }
+
+    /// Runs `sql` (one or more statements) on a connection of the test's own.
+    fn execute(&self, sql: &str) {
+        self.db.pool.get().unwrap().batch_execute(sql).unwrap();
     }
 
     fn batch(&self, id: &str) -> IngestBatch {
@@ -100,6 +123,11 @@ impl Fixture {
 
     fn photos(&self, item_id: &str) -> Vec<IngestPhoto> {
         ingest::photos(&mut self.db.pool.get().unwrap(), item_id).unwrap()
+    }
+
+    /// What `retryIngestItem` does before handing the item to the runner.
+    fn retry(&self, id: &str) {
+        ingest::retry(&mut self.db.pool.get().unwrap(), id).unwrap();
     }
 
     fn set_item_status(&self, id: &str, status: IngestItemStatus) {
@@ -167,6 +195,19 @@ fn image_urls(request: &ChatRequest) -> Vec<&str> {
         .collect()
 }
 
+/// The `detail` of every image part of `request`.
+fn image_details(request: &ChatRequest) -> Vec<Detail> {
+    request
+        .messages
+        .iter()
+        .flat_map(|message| &message.content)
+        .filter_map(|part| match part {
+            ContentPart::ImageUrl { detail, .. } => Some(*detail),
+            ContentPart::Text(_) => None,
+        })
+        .collect()
+}
+
 fn schema_name(request: &ChatRequest) -> &str {
     match &request.response_format {
         Some(ResponseFormat::JsonSchema { name, .. }) => name,
@@ -213,6 +254,7 @@ async fn describes_every_photo_in_parallel_and_synthesises_the_item() {
         assert_eq!(urls.len(), 1);
         assert!(urls[0].starts_with(DATA_URL_PREFIX), "{}", &urls[0][..40]);
         assert!(urls[0].len() > DATA_URL_PREFIX.len());
+        assert_eq!(image_details(vision), [Detail::Auto]);
         assert_eq!(schema_name(vision), "photo_description");
         assert_eq!(vision.max_tokens, Some(DESCRIBE_MAX_TOKENS));
         assert!(user_text(vision).ends_with("of 2 of one item."));
@@ -252,7 +294,8 @@ async fn describes_every_photo_in_parallel_and_synthesises_the_item() {
     assert_eq!(f.batch(&batch.id).status, IngestBatchStatus::Reviewing);
     assert_eq!(
         drain(&mut events),
-        HashMap::from([("photo", 2), ("item", 1), ("batch", 1)])
+        // The item twice: analysing, then ready.
+        HashMap::from([("photo", 2), ("item", 2), ("batch", 1)])
     );
 }
 
@@ -343,10 +386,10 @@ async fn retry_reruns_only_failed_photos_and_the_synthesis() {
     assert_eq!(errors_of(&f.photos(&item.id)), [None, Some(NOT_JSON)]);
 
     // What `retryIngestItem` does: back to queued, then run the item.
-    f.set_item_status(&item.id, IngestItemStatus::Queued);
+    let mut events = f.runner.events().subscribe(&batch.id);
+    f.retry(&item.id);
     fake.push(Ok(description("receipt", "Amazon receipt for a mouse")));
     fake.push(Ok(suggestion("Second guess")));
-    let mut events = f.runner.events().subscribe(&batch.id);
     f.runner.run_item(&item.id).await.unwrap();
 
     let requests = fake.requests();
@@ -364,10 +407,11 @@ async fn retry_reruns_only_failed_photos_and_the_synthesis() {
     let item = f.item(&item.id);
     assert_eq!(item.status, IngestItemStatus::Ready);
     assert_eq!(suggestion_of(&item)["name"], "Second guess");
-    // The batch was already reviewing, so only the photo and item changed.
+    // The retry sent the batch back to processing; the run settles it again.
+    assert_eq!(f.batch(&batch.id).status, IngestBatchStatus::Reviewing);
     assert_eq!(
         drain(&mut events),
-        HashMap::from([("photo", 1), ("item", 1)])
+        HashMap::from([("photo", 1), ("item", 2), ("batch", 1)])
     );
 }
 
@@ -432,17 +476,31 @@ async fn a_not_configured_client_fails_the_item_readably() {
     );
 }
 
-/// Answers every call only once the test opens the gate, counting calls in
-/// flight.
+/// Answers every call (a description for a photo, else a suggestion) once
+/// the gate lets it, counting calls in flight.
 struct GatedClient {
+    calls: AtomicUsize,
     in_flight: AtomicUsize,
     peak: AtomicUsize,
     gate: Semaphore,
 }
 
+impl GatedClient {
+    /// A client whose gate lets `permits` calls through before it closes.
+    fn new(permits: usize) -> Arc<Self> {
+        Arc::new(Self {
+            calls: AtomicUsize::new(0),
+            in_flight: AtomicUsize::new(0),
+            peak: AtomicUsize::new(0),
+            gate: Semaphore::new(permits),
+        })
+    }
+}
+
 #[async_trait]
 impl AiClient for GatedClient {
     async fn chat(&self, _: &AiConfig, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
         self.peak.fetch_max(now, Ordering::SeqCst);
         self.gate
@@ -477,11 +535,7 @@ async fn wait_for(what: &str, condition: impl Fn() -> bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn parallelism_is_bounded_by_the_semaphore() {
-    let client = Arc::new(GatedClient {
-        in_flight: AtomicUsize::new(0),
-        peak: AtomicUsize::new(0),
-        gate: Semaphore::new(0),
-    });
+    let client = GatedClient::new(0);
     let f = Fixture::new(client.clone());
     let (batch, item) = f.submitted(6);
 
@@ -582,4 +636,235 @@ async fn resume_interrupted_runs_processing_batches_in_the_background() {
     })
     .await;
     assert_eq!(f.item(&item.id).status, IngestItemStatus::Ready);
+}
+
+#[tokio::test]
+async fn extra_instructions_reach_both_system_prompts() {
+    let fake = Arc::new(FakeAiClient::new());
+    let f = Fixture::new(fake.clone());
+    diesel::replace_into(settings::table)
+        .values((
+            settings::key.eq(EXTRA_INSTRUCTIONS_KEY),
+            settings::value.eq("Prefer metric"),
+        ))
+        .execute(&mut f.db.pool.get().unwrap())
+        .unwrap();
+    let (batch, _) = f.submitted(1);
+    fake.push(Ok(description("photo", "A ruler")));
+    fake.push(Ok(suggestion("Ruler")));
+
+    f.runner.run_batch(&batch.id).await.unwrap();
+
+    let requests = fake.requests();
+    assert_eq!(requests.len(), 2);
+    for (request, base) in requests.iter().zip([VISION_SYSTEM, SYNTHESIS_SYSTEM]) {
+        let system = system_text(request);
+        assert!(system.starts_with(base), "{system}");
+        assert!(
+            system.ends_with("Additional instructions from the user:\nPrefer metric"),
+            "{system}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_failed_retry_does_not_keep_the_stale_suggestion() {
+    let fake = Arc::new(FakeAiClient::new());
+    let f = Fixture::new(fake.clone());
+    let (batch, item) = f.submitted(1);
+    fake.push(Ok(description("photo", "A mouse")));
+    fake.push(Ok(suggestion("First guess")));
+    f.runner.run_batch(&batch.id).await.unwrap();
+    assert_eq!(suggestion_of(&f.item(&item.id))["name"], "First guess");
+
+    f.retry(&item.id);
+    fake.push(Ok("I would rather not say.".to_owned()));
+    f.runner.run_item(&item.id).await.unwrap();
+
+    let item = f.item(&item.id);
+    assert_eq!(item.status, IngestItemStatus::Failed);
+    assert_eq!(item.error.as_deref(), Some(NOT_JSON));
+    assert_eq!(item.suggestion, None);
+}
+
+#[tokio::test]
+async fn a_run_on_an_item_that_is_not_queued_changes_nothing() {
+    let fake = Arc::new(FakeAiClient::new());
+    let f = Fixture::new(fake.clone());
+    let (batch, item) = f.submitted(1);
+    f.set_item_status(&item.id, IngestItemStatus::Accepted);
+    let before = f.item(&item.id);
+    let mut events = f.runner.events().subscribe(&batch.id);
+
+    f.runner.run_item(&item.id).await.unwrap();
+
+    assert!(fake.requests().is_empty());
+    assert_eq!(f.item(&item.id), before);
+    assert!(
+        f.photos(&item.id)
+            .iter()
+            .all(|p| p.status == IngestPhotoStatus::Pending)
+    );
+    // Only the batch moved: its one item is closed, so it is done.
+    assert_eq!(f.batch(&batch.id).status, IngestBatchStatus::Done);
+    assert_eq!(drain(&mut events), HashMap::from([("batch", 1)]));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_runs_analyse_each_item_once_and_publish_one_batch_change() {
+    let client = GatedClient::new(Semaphore::MAX_PERMITS);
+    let f = Fixture::new(client.clone());
+    let (batch, items) = f.submitted_items(&[1, 1]);
+    let mut events = f.runner.events().subscribe(&batch.id);
+
+    // A retry's run of the first item races the batch's run of both.
+    let (batch_run, item_run) = tokio::join!(
+        f.runner.run_batch(&batch.id),
+        f.runner.run_item(&items[0].id)
+    );
+    batch_run.unwrap();
+    item_run.unwrap();
+
+    // Two photos and two syntheses: the first item was claimed only once.
+    assert_eq!(client.calls.load(Ordering::SeqCst), 4);
+    for item in &items {
+        assert_eq!(f.item(&item.id).status, IngestItemStatus::Ready);
+    }
+    assert_eq!(f.batch(&batch.id).status, IngestBatchStatus::Reviewing);
+    assert_eq!(
+        drain(&mut events),
+        HashMap::from([("photo", 2), ("item", 4), ("batch", 1)])
+    );
+}
+
+/// Answers synthesis at once and vision calls in arrival order: the first
+/// with `first`, every later one only once the gate opens.
+struct HoldsLaterPhotos {
+    vision_calls: AtomicUsize,
+    held: AtomicUsize,
+    gate: Semaphore,
+    first: Result<String, AiError>,
+}
+
+impl HoldsLaterPhotos {
+    fn new(first: Result<String, AiError>) -> Arc<Self> {
+        Arc::new(Self {
+            vision_calls: AtomicUsize::new(0),
+            held: AtomicUsize::new(0),
+            gate: Semaphore::new(0),
+            first,
+        })
+    }
+}
+
+#[async_trait]
+impl AiClient for HoldsLaterPhotos {
+    async fn chat(&self, _: &AiConfig, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        let content = if image_urls(&request).is_empty() {
+            suggestion("Mouse")
+        } else if self.vision_calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.first.clone()?
+        } else {
+            self.held.fetch_add(1, Ordering::SeqCst);
+            self.gate
+                .acquire()
+                .await
+                .expect("gate never closes")
+                .forget();
+            description("photo", "A mouse")
+        };
+        Ok(ChatResponse {
+            content,
+            usage: None,
+            model: request.model,
+        })
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_photo_that_cannot_be_stored_does_not_abort_its_sibling() {
+    let client = HoldsLaterPhotos::new(Err(AiError::Transport("reset".to_owned())));
+    let f = Fixture::new(client.clone());
+    let (batch, item) = f.submitted(2);
+    // Every write to a photo fails until the fault row goes.
+    f.execute(
+        "CREATE TABLE test_fault (id INTEGER);
+         INSERT INTO test_fault VALUES (1);
+         CREATE TRIGGER test_photo_fault BEFORE UPDATE ON ingest_photos
+         WHEN EXISTS (SELECT 1 FROM test_fault)
+         BEGIN SELECT RAISE(ABORT, 'injected fault'); END;",
+    );
+
+    let runner = Arc::clone(&f.runner);
+    let batch_id = batch.id.clone();
+    let run = tokio::spawn(async move { runner.run_batch(&batch_id).await });
+    wait_for("the second photo's call", || {
+        client.held.load(Ordering::SeqCst) == 1
+    })
+    .await;
+    // Time for the first photo to fail and its failure not to be stored.
+    time::sleep(Duration::from_millis(200)).await;
+    f.execute("DELETE FROM test_fault;");
+    client.gate.add_permits(1);
+    time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the run finishes")
+        .unwrap()
+        .unwrap();
+
+    // The sibling ran to the end instead of being aborted mid-call.
+    let statuses: Vec<IngestPhotoStatus> = f.photos(&item.id).iter().map(|p| p.status).collect();
+    assert!(
+        statuses.contains(&IngestPhotoStatus::Described),
+        "{statuses:?}"
+    );
+    assert!(
+        statuses.contains(&IngestPhotoStatus::Pending),
+        "{statuses:?}"
+    );
+    let item = f.item(&item.id);
+    assert_eq!(item.status, IngestItemStatus::Failed);
+    assert_eq!(item.error.as_deref(), Some("analysis task failed"));
+    assert_eq!(f.batch(&batch.id).status, IngestBatchStatus::Reviewing);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_failed_settle_does_not_abort_the_other_items() {
+    let client = HoldsLaterPhotos::new(Ok(description("photo", "A mouse")));
+    let f = Fixture::new(client.clone());
+    let (batch, items) = f.submitted_items(&[1, 1]);
+    // A status Diesel cannot read makes every settle fail until restored.
+    f.execute(&format!(
+        "UPDATE ingest_batches SET status = 'bogus' WHERE id = '{}';",
+        batch.id
+    ));
+
+    let runner = Arc::clone(&f.runner);
+    let batch_id = batch.id.clone();
+    let run = tokio::spawn(async move { runner.run_batch(&batch_id).await });
+    wait_for("one item ready and the other's call held", || {
+        client.held.load(Ordering::SeqCst) == 1
+            && items
+                .iter()
+                .any(|item| f.item(&item.id).status == IngestItemStatus::Ready)
+    })
+    .await;
+    // Time for the ready item's settle to fail.
+    time::sleep(Duration::from_millis(200)).await;
+    f.execute(&format!(
+        "UPDATE ingest_batches SET status = 'processing' WHERE id = '{}';",
+        batch.id
+    ));
+    client.gate.add_permits(1);
+    let result = time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the run finishes")
+        .unwrap();
+
+    // The failed settle is reported, but only after every item finished.
+    assert!(result.is_err());
+    for item in &items {
+        assert_eq!(f.item(&item.id).status, IngestItemStatus::Ready);
+    }
+    assert_eq!(f.batch(&batch.id).status, IngestBatchStatus::Reviewing);
 }

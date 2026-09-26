@@ -350,15 +350,42 @@ pub fn set_item_status(
     })
 }
 
-/// Stores the synthesis step's `suggestion` for item `id`.
+/// Claims queued item `id` for the runner: moves it to `analysing`, clearing
+/// its error and any earlier suggestion, and returns it. `None` (nothing
+/// changed) when the item is in any other status, so two runs never analyse
+/// one item at once and a stale run cannot reopen a reviewed item.
+pub fn claim_for_analysis(conn: &mut SqliteConnection, id: &str) -> Result<Option<IngestItem>> {
+    conn.transaction(|conn| {
+        let claimed = diesel::update(
+            ingest_items::table
+                .find(id)
+                .filter(ingest_items::status.eq(IngestItemStatus::Queued)),
+        )
+        .set((
+            ingest_items::status.eq(IngestItemStatus::Analysing),
+            ingest_items::error.eq(None::<String>),
+            ingest_items::updated_at.eq(now()),
+        ))
+        .execute(conn)
+        .with_context(|| format!("claiming ingest item {id:?} for analysis"))?;
+        if claimed == 0 {
+            return Ok(None);
+        }
+        set_item_suggestion(conn, id, None)?;
+        touch_item_batch(conn, id)?;
+        get_item(conn, id)
+    })
+}
+
+/// Stores the synthesis step's `suggestion` for item `id`, or clears it.
 pub fn set_item_suggestion(
     conn: &mut SqliteConnection,
     id: &str,
-    suggestion: &Value,
+    suggestion: Option<&Value>,
 ) -> Result<()> {
     let updated = diesel::update(ingest_items::table.find(id))
         .set((
-            ingest_items::suggestion.eq(suggestion.to_string()),
+            ingest_items::suggestion.eq(suggestion.map(Value::to_string)),
             ingest_items::updated_at.eq(now()),
         ))
         .execute(conn)
@@ -1024,7 +1051,7 @@ mod tests {
         // The model called the receipt a photo; the user corrects it.
         mark_photo_described(&mut conn, &receipt.id, &json!({}), SuggestedKind::Photo).unwrap();
         mark_photo_described(&mut conn, &other.id, &json!({}), SuggestedKind::Other).unwrap();
-        set_item_suggestion(&mut conn, &item.id, &json!({ "name": "Suggested" })).unwrap();
+        set_item_suggestion(&mut conn, &item.id, Some(&json!({ "name": "Suggested" }))).unwrap();
 
         let kinds = [
             (receipt.id.clone(), AttachmentKind::Receipt),
@@ -1367,6 +1394,32 @@ mod tests {
     }
 
     #[test]
+    fn claim_takes_only_a_queued_item_and_clears_its_last_result() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let (batch, item) = ingest_batch(&mut conn, None);
+        ingest_photo(&mut conn, &item.id, &"cc".repeat(32), "image/jpeg");
+        submit(&mut conn, &batch.id).unwrap();
+        set_item_suggestion(&mut conn, &item.id, Some(&json!({ "name": "Old" }))).unwrap();
+        set_item_status(&mut conn, &item.id, IngestItemStatus::Queued, Some("old")).unwrap();
+
+        let claimed = claim_for_analysis(&mut conn, &item.id).unwrap().unwrap();
+        assert_eq!(claimed.status, IngestItemStatus::Analysing);
+        assert_eq!((claimed.error, claimed.suggestion), (None, None));
+        // Already analysing: a second run claims nothing.
+        assert_eq!(claim_for_analysis(&mut conn, &item.id).unwrap(), None);
+        for status in [IngestItemStatus::Ready, IngestItemStatus::Accepted] {
+            set_item_status(&mut conn, &item.id, status, None).unwrap();
+            assert_eq!(claim_for_analysis(&mut conn, &item.id).unwrap(), None);
+            assert_eq!(
+                get_item(&mut conn, &item.id).unwrap().unwrap().status,
+                status
+            );
+        }
+        assert_eq!(claim_for_analysis(&mut conn, "missing").unwrap(), None);
+    }
+
+    #[test]
     fn requeue_interrupted_resets_analysing_items() {
         let db = TestDb::new();
         let mut conn = db.pool.get().unwrap();
@@ -1502,7 +1555,7 @@ mod tests {
         )
         .unwrap();
         mark_photo_failed(&mut conn, &staged[1].id, "unreadable answer").unwrap();
-        set_item_suggestion(&mut conn, &item.id, &json!({ "name": "Mouse" })).unwrap();
+        set_item_suggestion(&mut conn, &item.id, Some(&json!({ "name": "Mouse" }))).unwrap();
 
         let described = get_photo(&mut conn, &staged[0].id).unwrap().unwrap();
         assert_eq!(described.status, IngestPhotoStatus::Described);

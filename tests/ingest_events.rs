@@ -200,6 +200,8 @@ async fn events_stream_photo_item_and_batch_and_ends_on_done() {
     )
     .await;
 
+    // The item starts analysing, its photo is described, the item is ready.
+    assert_eq!(stream.next().await, Some(event("item", &item.id)));
     assert_eq!(stream.next().await, Some(event("photo", &photo.id)));
     assert_eq!(stream.next().await, Some(event("item", &item.id)));
     assert_eq!(stream.next().await, Some(event("batch", &batch.id)));

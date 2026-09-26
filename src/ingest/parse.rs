@@ -10,7 +10,7 @@
 
 use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
-use serde_json::{Deserializer, Map, Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::kinds::SuggestedKind;
 use crate::money::Cents;
@@ -146,26 +146,60 @@ pub fn parse_suggestion(answer: &str, known_tags: &[String]) -> Result<ItemSugge
 }
 
 /// The JSON object in `answer`: the whole answer when it is JSON, else the
-/// first `{…}` that parses, which skips a code fence and any prose around
-/// it. JSON that is not an object (an array, a string) is refused rather
-/// than searched, so `[{…}, {…}]` is not mistaken for one answer.
+/// first balanced `{…}` group that parses as one, which skips a code fence
+/// and any prose around it. JSON that is not an object (an array, a string)
+/// is refused rather than searched, so `[{…}, {…}]` is not mistaken for one
+/// answer. A group that never closes means a truncated answer: that is
+/// [`ParseError::NotJson`], never an object nested inside it.
 fn first_object(answer: &str) -> Result<Map<String, Value>, ParseError> {
     match serde_json::from_str(answer.trim()) {
         Ok(Value::Object(object)) => return Ok(object),
         Ok(_) => return Err(ParseError::NotObject),
         Err(_) => {}
     }
-    answer
-        .match_indices('{')
-        .find_map(|(start, _)| {
-            // Reads one value from `start` and ignores whatever follows it.
-            let mut values = Deserializer::from_str(&answer[start..]).into_iter::<Value>();
-            match values.next() {
-                Some(Ok(Value::Object(object))) => Some(object),
-                _ => None,
+    let mut rest = answer;
+    while let Some(start) = rest.find('{') {
+        let group = &rest[start..];
+        let len = braced_len(group).ok_or(ParseError::NotJson)?;
+        if let Ok(Value::Object(object)) = serde_json::from_str(&group[..len]) {
+            return Ok(object);
+        }
+        // Not JSON (prose such as `{this}`): look after the whole group, so
+        // nothing nested inside it is taken for the answer.
+        rest = &group[len..];
+    }
+    Err(ParseError::NotJson)
+}
+
+/// The byte length of the `{…}` group `text` starts with, braces inside
+/// JSON strings ignored; `None` when it never closes.
+fn braced_len(text: &str) -> Option<usize> {
+    let mut depth = 0_usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in text.bytes().enumerate() {
+        if in_string {
+            match byte {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
             }
-        })
-        .ok_or(ParseError::NotJson)
+            continue;
+        }
+        match byte {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(index + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// A non-blank string field, trimmed.
@@ -282,6 +316,38 @@ mod tests {
         assert_eq!(
             parse_suggestion(r#"{"name": "Mouse", "notes": "cut of"#, &tags()),
             Err(ParseError::NotJson)
+        );
+    }
+
+    #[test]
+    fn a_truncated_outer_object_never_yields_an_inner_one() {
+        let truncated = r#"{"name": "Mouse", "details": {"brand": "Logitech"}, "notes": "cut of"#;
+        for answer in [
+            truncated.to_owned(),
+            format!("```json\n{truncated}"),
+            // Cut mid-structure, then the fence closes: still one open group.
+            "```json\n{\"summary\": \"A mouse\", \"details\": {\"summary\": \"inner\"}\n```"
+                .to_owned(),
+        ] {
+            assert_eq!(
+                parse_suggestion(&answer, &tags()),
+                Err(ParseError::NotJson),
+                "{answer}"
+            );
+            assert_eq!(
+                parse_description(&answer),
+                Err(ParseError::NotJson),
+                "{answer}"
+            );
+        }
+    }
+
+    #[test]
+    fn braces_inside_strings_do_not_end_the_object() {
+        let answer = r#"Here: {"summary": "A sign reading \"}{\" and {x}", "kind": "photo"} done"#;
+        assert_eq!(
+            parse_description(answer).unwrap().summary,
+            r#"A sign reading "}{" and {x}"#
         );
     }
 
