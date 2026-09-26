@@ -1,5 +1,6 @@
 import clsx from 'clsx';
 import { ChangeEvent, DragEvent, ReactNode, useRef, useState } from 'react';
+import { toast } from 'react-toastify';
 import { UploadProgress, UploadStatus, useUploadPhoto } from 'hooks/useUploadPhoto';
 import { SECONDARY_ACTION } from './buttonStyles';
 
@@ -28,8 +29,9 @@ const StatusRow = ({ entry }: { entry: UploadProgress }) => (
 /**
  * Adds photos to `entity`: an `Add photos` button over a hidden multi-file
  * image input, and the whole region (wrapped around `children`, the gallery)
- * as a drop target. The latest batch's per-file status is listed below. New
- * files are ignored while a batch is still uploading.
+ * as a drop target. The latest batch's per-file status is listed below. Files
+ * dropped while a batch is still uploading are refused with a toast. Pages key
+ * it by entity id so its status never follows navigation to another entity.
  */
 export const PhotoUploader = ({
   entity,
@@ -43,7 +45,13 @@ export const PhotoUploader = ({
   const [dragging, setDragging] = useState(false);
 
   const send = (files: File[]) => {
-    if (files.length > 0 && !uploading) void upload(files);
+    if (files.length === 0) return;
+    // One batch at a time keeps the server's first-photo/primary order deterministic.
+    if (uploading) {
+      toast.error('Wait for the current upload to finish');
+      return;
+    }
+    void upload(files);
   };
 
   const onChoose = (event: ChangeEvent<HTMLInputElement>) => {

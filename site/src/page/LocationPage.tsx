@@ -88,8 +88,10 @@ export const LocationPage = () => {
       )}
       {blocker === null && <p className="mt-8 text-muted">Nothing stored here yet.</p>}
       <Section title="Photos">
-        <PhotoUploader entity={entity}>
-          <PhotoGallery photos={entity.attachments.filter(isGalleryPhoto)} />
+        {/* Keyed: the route reuses this page for another id, so an unkeyed
+            uploader would carry its status (or running batch) to that entity. */}
+        <PhotoUploader key={entity.id} entity={entity}>
+          <PhotoGallery key={entity.id} photos={entity.attachments.filter(isGalleryPhoto)} />
         </PhotoUploader>
       </Section>
       {dialog}

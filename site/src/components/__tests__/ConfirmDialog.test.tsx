@@ -92,4 +92,20 @@ describe('ConfirmDialog', () => {
     rerender(dialog(false));
     expect(screen.getByRole('button', { name: 'Delete' })).toHaveFocus();
   });
+
+  it('locks page scrolling while open', () => {
+    const { rerender, onCancel, onConfirm } = renderDialog();
+    expect(document.body.style.overflow).toBe('hidden');
+    rerender(
+      <ConfirmDialog
+        open={false}
+        title="Delete Drill?"
+        body="This cannot be undone."
+        confirmLabel="Delete item"
+        onConfirm={onConfirm}
+        onCancel={onCancel}
+      />,
+    );
+    expect(document.body.style.overflow).toBe('');
+  });
 });

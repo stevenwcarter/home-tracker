@@ -1,4 +1,5 @@
 import { KeyboardEvent, useEffect, useId, useRef, useState } from 'react';
+import { useLockBodyScroll } from 'hooks/useLockBodyScroll';
 import { AttachmentRef } from 'types/entity';
 import { thumbUrlAt } from 'utils/thumbUrl';
 import { SECONDARY_ACTION } from './buttonStyles';
@@ -9,6 +10,12 @@ interface LightboxProps {
   /** The photo shown first. */
   startIndex: number;
   onClose: () => void;
+  /**
+   * Where focus goes back to on close (the thumbnail that opened it). Passed
+   * in because Safari does not focus a button on mouse click; without it, the
+   * element focused at open time is used.
+   */
+  opener?: HTMLElement | null;
 }
 
 const FOCUSABLE = 'button:not([disabled]), a[href]';
@@ -20,11 +27,14 @@ const FOCUSABLE = 'button:not([disabled]), a[href]';
  * and a backdrop click close it; closing returns focus to whatever had it
  * before (the gallery thumbnail that opened it).
  */
-export const Lightbox = ({ photos, startIndex, onClose }: LightboxProps) => {
+export const Lightbox = ({ photos, startIndex, onClose, opener }: LightboxProps) => {
   const [index, setIndex] = useState(startIndex);
   const titleId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  // Captured at open, like the fallback below; a later prop change does not move it.
+  const openerRef = useRef(opener);
+  useLockBodyScroll(true);
   const count = photos.length;
   // Clamped, so a photo deleted from under an open viewer shows its neighbour.
   const shown = Math.min(index, count - 1);
@@ -40,7 +50,9 @@ export const Lightbox = ({ photos, startIndex, onClose }: LightboxProps) => {
   });
 
   useEffect(() => {
-    const opener = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const returnTo =
+      openerRef.current ??
+      (document.activeElement instanceof HTMLElement ? document.activeElement : null);
     closeRef.current?.focus();
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented) return;
@@ -57,7 +69,7 @@ export const Lightbox = ({ photos, startIndex, onClose }: LightboxProps) => {
     document.addEventListener('keydown', onKeyDown, { capture: true });
     return () => {
       document.removeEventListener('keydown', onKeyDown, { capture: true });
-      opener?.focus();
+      returnTo?.focus();
     };
   }, []);
 

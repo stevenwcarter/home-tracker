@@ -13,6 +13,8 @@ const useUploadPhoto = vi.fn((entity: { id: string; parentId: string | null }) =
   void entity;
   return { upload, ...hookState };
 });
+vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
+import { toast } from 'react-toastify';
 vi.mock('hooks/useUploadPhoto', () => ({
   useUploadPhoto: (entity: { id: string; parentId: string | null }) => useUploadPhoto(entity),
 }));
@@ -104,5 +106,15 @@ describe('PhotoUploader', () => {
   it('has no status list before the first upload', () => {
     renderUploader();
     expect(screen.queryByRole('list', { name: 'Upload status' })).not.toBeInTheDocument();
+  });
+
+  it('tells the user to wait when files arrive while a batch is uploading', () => {
+    hookState.uploading = true;
+    hookState.progress = [{ file: jpeg('a.jpg'), status: 'uploading' }];
+    renderUploader();
+    const zone = screen.getByRole('group', { name: 'Photo upload' });
+    fireEvent.drop(zone, { dataTransfer: { files: [jpeg('b.jpg')], types: ['Files'] } });
+    expect(upload).not.toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalledWith('Wait for the current upload to finish');
   });
 });

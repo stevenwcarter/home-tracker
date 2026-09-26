@@ -135,4 +135,38 @@ describe('Lightbox', () => {
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'View Front' })).toHaveFocus();
   });
+
+  // Safari does not focus a button on mouse click, so the opener is passed in
+  // rather than read from `document.activeElement`.
+  it('returns focus to the given opener even when it never had focus', async () => {
+    const user = userEvent.setup();
+    const thumb = document.createElement('button');
+    thumb.textContent = 'Thumb';
+    document.body.appendChild(thumb);
+    try {
+      const Harness = () => {
+        const [open, setOpen] = useState(true);
+        return open ? (
+          <Lightbox photos={PHOTOS} startIndex={0} opener={thumb} onClose={() => setOpen(false)} />
+        ) : (
+          <p>closed</p>
+        );
+      };
+      render(<Harness />);
+      // Focus was never on the thumb (document.body had it at open).
+      expect(thumb).not.toHaveFocus();
+      await user.keyboard('{Escape}');
+      expect(screen.getByText('closed')).toBeInTheDocument();
+      expect(thumb).toHaveFocus();
+    } finally {
+      thumb.remove();
+    }
+  });
+
+  it('locks page scrolling while open', () => {
+    const { unmount } = render(<Lightbox photos={PHOTOS} startIndex={0} onClose={vi.fn()} />);
+    expect(document.body.style.overflow).toBe('hidden');
+    unmount();
+    expect(document.body.style.overflow).toBe('');
+  });
 });

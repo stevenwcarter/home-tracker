@@ -460,4 +460,44 @@ describe('ItemPage photos', () => {
     expect(within(photos).getByRole('button', { name: 'Add photos' })).toBeInTheDocument();
     expect(screen.queryByRole('figure', { name: 'Featured photo' })).not.toBeInTheDocument();
   });
+
+  // The route is not keyed by `:id` and a cached entity skips the skeleton, so
+  // without a per-entity key one uploader instance would carry its status
+  // (and a running batch's disabled state) over to the next entity.
+  it("does not carry an upload's status over to another cached entity", async () => {
+    const user = userEvent.setup();
+    const toolbox = entityDetail({
+      id: 'toolbox',
+      name: 'Toolbox',
+      items: [listItem({ id: 'drill', name: 'Drill' })],
+    });
+    const drillHere = {
+      ...drill,
+      parentId: null,
+      items: [listItem({ id: 'toolbox', name: 'Toolbox' })],
+    };
+    renderRoute('/items/toolbox', [
+      entityMock('toolbox', toolbox),
+      summaryMock,
+      entityMock('drill', drillHere),
+      entityMock('drill', drillHere),
+      summary(),
+    ]);
+    const contents = await screen.findByRole('region', { name: 'Contents' });
+    await user.click(within(contents).getByRole('link', { name: 'Drill' }));
+    await screen.findByRole('heading', { level: 1, name: 'Drill' });
+    await user.upload(
+      screen.getByLabelText('Photo files'),
+      new File(['jpeg'], 'front.jpg', { type: 'image/jpeg' }),
+    );
+    const status = await screen.findByRole('list', { name: 'Upload status' });
+    await waitFor(() => expect(status).toHaveTextContent('Uploaded'));
+
+    const drillContents = screen.getByRole('region', { name: 'Contents' });
+    await user.click(within(drillContents).getByRole('link', { name: 'Toolbox' }));
+    // Toolbox is cached, so it renders at once, with no skeleton in between.
+    expect(await screen.findByRole('heading', { level: 1, name: 'Toolbox' })).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Upload status' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Add photos' })).toBeEnabled();
+  });
 });

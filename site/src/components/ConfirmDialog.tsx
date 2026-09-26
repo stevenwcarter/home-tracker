@@ -1,4 +1,5 @@
 import { KeyboardEvent, ReactNode, useEffect, useId, useRef } from 'react';
+import { useLockBodyScroll } from 'hooks/useLockBodyScroll';
 
 interface ConfirmDialogProps {
   open: boolean;
@@ -30,6 +31,7 @@ export const ConfirmDialog = ({
   const bodyId = useId();
   const cancelRef = useRef<HTMLButtonElement>(null);
   const confirmRef = useRef<HTMLButtonElement>(null);
+  useLockBodyScroll(open);
   // Read through a ref so a new `onCancel` identity each render doesn't re-run the effect.
   const onCancelRef = useRef(onCancel);
   useEffect(() => {

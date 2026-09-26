@@ -15,7 +15,7 @@ const PhotoTile = ({
   busy,
 }: {
   photo: AttachmentRef;
-  onOpen: () => void;
+  onOpen: (thumb: HTMLButtonElement) => void;
   onDelete: () => void;
   onMakePrimary: () => void;
   busy: boolean;
@@ -26,7 +26,7 @@ const PhotoTile = ({
       <div className="relative">
         <button
           type="button"
-          onClick={onOpen}
+          onClick={(event) => onOpen(event.currentTarget)}
           aria-label={`View ${photo.title}`}
           className="block w-full rounded-md focus-visible:outline-2 focus-visible:outline-accent"
         >
@@ -77,7 +77,8 @@ export const PhotoGallery = ({ photos }: { photos: AttachmentRef[] }) => {
   const { remove, loading: removing } = useDeleteAttachment();
   const { setPrimary, loading: settingPrimary } = useSetPrimaryPhoto();
   const [doomed, setDoomed] = useState<AttachmentRef | null>(null);
-  const [viewing, setViewing] = useState<number | null>(null);
+  // The open photo's index and the thumbnail that opened it (focus returns there).
+  const [viewing, setViewing] = useState<{ index: number; opener: HTMLElement } | null>(null);
 
   const confirmDelete = async () => {
     if (!doomed) return;
@@ -98,7 +99,7 @@ export const PhotoGallery = ({ photos }: { photos: AttachmentRef[] }) => {
           <PhotoTile
             key={photo.id}
             photo={photo}
-            onOpen={() => setViewing(index)}
+            onOpen={(opener) => setViewing({ index, opener })}
             onDelete={() => setDoomed(photo)}
             onMakePrimary={() => void setPrimary(photo.id)}
             busy={removing || settingPrimary}
@@ -106,7 +107,12 @@ export const PhotoGallery = ({ photos }: { photos: AttachmentRef[] }) => {
         ))}
       </ul>
       {viewing !== null && (
-        <Lightbox photos={photos} startIndex={viewing} onClose={() => setViewing(null)} />
+        <Lightbox
+          photos={photos}
+          startIndex={viewing.index}
+          opener={viewing.opener}
+          onClose={() => setViewing(null)}
+        />
       )}
       <ConfirmDialog
         open={doomed !== null}

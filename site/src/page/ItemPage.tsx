@@ -214,8 +214,10 @@ export const ItemPage = () => {
         </Section>
       )}
       <Section title="Photos">
-        <PhotoUploader entity={entity}>
-          <PhotoGallery photos={photos} />
+        {/* Keyed: the route reuses this page for another id, so an unkeyed
+            uploader would carry its status (or running batch) to that entity. */}
+        <PhotoUploader key={entity.id} entity={entity}>
+          <PhotoGallery key={entity.id} photos={photos} />
         </PhotoUploader>
       </Section>
       {otherAttachments.length > 0 && (

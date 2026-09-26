@@ -122,6 +122,18 @@ describe('useUploadPhoto', () => {
     expect(toast.error).toHaveBeenCalledWith(`Could not upload big.jpg: ${message}`);
   });
 
+  it("passes a 403's server message through", async () => {
+    answerUploads(() => json(403, { error: 'this instance is read-only' }));
+    const { result } = render(() => useUploadPhoto(DRILL));
+    const file = jpeg('a.jpg');
+    let results: UploadResult[] = [];
+    await act(async () => {
+      results = await result.current.upload([file]);
+    });
+    expect(results).toEqual([{ file, ok: false, error: 'this instance is read-only' }]);
+    expect(toast.error).toHaveBeenCalledWith('Could not upload a.jpg: this instance is read-only');
+  });
+
   it('falls back to the status when the error body is not JSON', async () => {
     answerUploads(() => new Response('<html>Bad gateway</html>', { status: 502 }));
     const { result } = render(() => useUploadPhoto(DRILL));
