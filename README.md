@@ -53,17 +53,19 @@ home-tracker import homebox-backup   # an exploded backup directory works too
 
 Reads a Homebox export, either the zip Homebox produces or that zip already
 unzipped into a folder, and upserts it into the database: entity types,
-locations and items, tags, custom fields, and attachments with their
-thumbnails. Every row is upserted by its Homebox UUID, so re-running the
-same backup is safe: it refreshes existing rows in place and never deletes
-anything. Homebox's two built-in entity types (`global.location`,
-`global.item`) are mapped by name onto the seeded location and item types
-instead of being inserted again. Attachment blobs are content-addressed by
-SHA-256 and written to `$DATA_DIR/originals/<sha256>`; thumbnails are
-stored in the database at Homebox's original 500px size. Maintenance
-entries and notifiers are not imported; the command prints a warning for
-each one found. The command's output is a per-table count of rows
-inserted, updated, and skipped, plus any warnings.
+entity templates and their template fields, locations and items, tags,
+custom fields, and attachments with their thumbnails. Every row is upserted
+by its Homebox UUID, so re-running the same backup is safe: it refreshes
+existing rows in place and never deletes anything. Homebox's two built-in
+entity types (`global.location`, `global.item`) are mapped by name onto the
+seeded location and item types instead of being inserted again. Homebox's
+attachment `path` column is ignored: each file is found in the backup by its
+attachment id, content-addressed by SHA-256, and written to
+`$DATA_DIR/originals/<sha256>`. Thumbnails are stored in the database at
+Homebox's original 500px size. Maintenance entries and notifiers are not
+imported; the command prints one warning per category with the count. The
+command's output is a per-table count of rows inserted, updated, and
+skipped, plus any warnings.
 
 ## Project layout
 

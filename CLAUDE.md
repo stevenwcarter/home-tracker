@@ -55,7 +55,7 @@ Single Rust crate at the repo root with an embedded, Vite-built React frontend. 
 - `money.rs`: `Cents`, money as integer minor units
 - `kinds.rs`: closed string enums (`AttachmentKind`, `FieldKind`) stored as lowercase TEXT
 - `models/`: one file per table, Diesel `Queryable`/`Selectable` structs
-- `svc/`: business logic, one file per aggregate (`entity.rs`, `tag.rs`, `attachment.rs`, `settings.rs`, `stats.rs`, `fixtures.rs`)
+- `svc/`: business logic, one file per aggregate (`entity.rs`, `entity_type.rs`, `entity_field.rs`, `tag.rs`, `attachment.rs`, `settings.rs`, `stats.rs`); `fixtures.rs` is test support (the shared sample inventory)
 - `graphql/`: juniper: `context.rs` (`GraphQLContext`, `Actor`, `Role`), `schema.rs` (`RootNode`), `query.rs`, `objects/` (one file per GraphQL type)
 - `import/`: Homebox backup importer: `source.rs` (zip or directory), `tables.rs` (row structs), `run.rs` (upsert), `report.rs`
 - `api/`: axum handlers: `graphql.rs` (`/graphql` is POST only; there is no auth in v1, so a GET-triggered mutation would be a LAN CSRF path; `/graphiql` in debug builds)
@@ -100,6 +100,10 @@ Never a raw palette class like `bg-zinc-900`. A theme is exactly one block of `-
 
 **The importer keeps Homebox's UUIDs** as primary keys and upserts by them, so re-running an import is safe. Homebox's two built-in entity types are matched by name (`global.location`, `global.item`) and mapped onto the seeded location/item type ids instead of being inserted again.
 
+**Homebox `path` is ignored.** The importer finds each attachment's blob in the backup by its attachment id and stores it by content hash; Homebox's opaque `path` column plays no part.
+
 **Enum columns are lowercase TEXT behind `kinds.rs`.** `AttachmentKind` and `FieldKind` round-trip through `FromStr`/`Display`; never match on the raw column string elsewhere.
 
-**Every `svc` read returns `Selectable` models via `as_select()`.** Diesel queries select a model's own columns this way rather than listing them by hand, so adding a column to a model cannot silently desync a query.
+**`svc` reads that return whole rows use `Selectable` models via `as_select()`; scalar reads (`settings::currency`, the `stats` aggregates) select columns directly.** Selecting a model's own columns this way rather than listing them by hand means adding a column to a model cannot silently desync a query.
+
+**SQLite `LIKE`/`lower()` fold case for ASCII only; non-ASCII names sort and match case-sensitively (known limitation).**

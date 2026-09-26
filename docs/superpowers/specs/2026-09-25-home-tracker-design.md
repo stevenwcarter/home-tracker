@@ -342,6 +342,11 @@ type Mutation {
 `DateTime` and `LocalDate` are juniper's chrono scalars. Phase 1 ships only `Summary`
 and `Query.summary` (dummy data); later phases add the rest.
 
+Phase 3 adds `Entity.parentId` and a flat `locations: [Entity!]!` query to
+`Query`, because a GraphQL selection cannot recurse and so can only read
+`locationTree` to a fixed depth. The client then builds the tree from that flat
+list and `locationTree` is retired.
+
 Validation rules enforced in `svc`, tested at the GraphQL seam:
 
 - `parentId` must not be the entity itself or any of its descendants (cycle).
@@ -541,8 +546,10 @@ Listed so a later change touching one of these funnels can find who relies on it
 
 - The importer keeps Homebox UUIDs as primary keys. Anything that generates ids
   must use v7 and must not assume ids are time-ordered for imported rows.
-- Built-in types are matched by **name** (`Location`, `Item` after mapping) on
-  import. Renaming the seeded rows breaks re-import of a Homebox backup.
+- Built-in types are recognised on import by their Homebox names
+  (`global.location`, `global.item`). The importer maps Homebox's
+  `global.location`/`global.item` onto the seeded ids by their fixed ids, so
+  deleting a seeded row breaks re-import; renaming it does not.
 - `thumbnails` rows are derived data. Any code path that replaces an
   attachment's bytes must delete its thumbnail rows.
 - `entities.parent_id` has `ON DELETE RESTRICT`; the "refuse delete with
