@@ -1,7 +1,18 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, within } from '@testing-library/react';
-import { GET_ENTITY, GET_SUMMARY } from 'hooks/queries';
+import { screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import {
+  DELETE_ATTACHMENT,
+  DELETE_ENTITY,
+  GET_LOCATIONS,
+  GET_ROOT_ITEMS,
+  GET_ENTITY,
+  GET_SUMMARY,
+  SET_PRIMARY_PHOTO,
+} from 'hooks/queries';
 import { entityDetail, listItem, locationSummary, SUMMARY } from 'test/entityFixtures';
+import { typesMock } from 'test/formFixtures';
+import { entityMock, spiedMock, summaryMock as summary } from 'test/pageMocks';
 import { renderRoute } from 'test/renderRoute';
 import { AttachmentKind, AttachmentRef, EntityFieldRef, FieldKind } from 'types/entity';
 
@@ -10,11 +21,7 @@ import { toast } from 'react-toastify';
 
 beforeEach(() => vi.clearAllMocks());
 
-const summaryMock = { request: { query: GET_SUMMARY }, result: { data: { summary: SUMMARY } } };
-const entityMock = (id: string, entity: unknown) => ({
-  request: { query: GET_ENTITY, variables: { id } },
-  result: { data: { entity } },
-});
+const summaryMock = summary();
 
 const attachment = (overrides: Partial<AttachmentRef> & Pick<AttachmentRef, 'id'>) =>
   ({
@@ -220,7 +227,7 @@ describe('ItemPage', () => {
       { id: 'garage', name: 'Garage', items: [listItem({ id: 'saw', name: 'Saw' })] },
       true,
     );
-    renderRoute('/items/garage', [entityMock('garage', garage), summaryMock]);
+    renderRoute('/items/garage', [entityMock('garage', garage), summaryMock, typesMock()]);
     expect(await screen.findByRole('heading', { level: 1, name: 'Garage' })).toBeInTheDocument();
     expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/locations\/garage$/);
   });
@@ -229,5 +236,159 @@ describe('ItemPage', () => {
     renderRoute('/items/missing', [entityMock('missing', null), summaryMock]);
     expect(await screen.findByRole('heading', { level: 1, name: 'Not found' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Back to home' })).toHaveAttribute('href', '/');
+  });
+
+  it('links Edit to the edit form', async () => {
+    renderRoute('/items/drill', [entityMock('drill', drill), summaryMock]);
+    expect(await screen.findByRole('link', { name: 'Edit' })).toHaveAttribute(
+      'href',
+      '/items/drill/edit',
+    );
+  });
+});
+
+describe('ItemPage delete', () => {
+  // Review Focus 5: the parent's cached contents are evicted and refetched, so
+  // the location page stops listing the item without a reload.
+  it('returns to the parent location, which no longer lists the item', async () => {
+    const user = userEvent.setup();
+    const garage = entityDetail(
+      {
+        id: 'garage',
+        name: 'Garage',
+        items: [listItem({ id: 'drill', name: 'Drill' }), listItem({ id: 'saw', name: 'Saw' })],
+      },
+      true,
+    );
+    const deleted = spiedMock(DELETE_ENTITY, { id: 'drill' }, { deleteEntity: true });
+    const summaryRefetch = spiedMock(GET_SUMMARY, undefined, { summary: SUMMARY });
+    const garageRefetch = spiedMock(
+      GET_ENTITY,
+      { id: 'garage' },
+      { entity: { ...garage, items: [listItem({ id: 'saw', name: 'Saw' })] } },
+    );
+    renderRoute('/locations/garage', [
+      entityMock('garage', garage),
+      summaryMock,
+      typesMock(),
+      entityMock('drill', drill),
+      deleted.mock,
+      summaryRefetch.mock,
+      // The evicted item page refetches itself before it is left.
+      entityMock('drill', null),
+      garageRefetch.mock,
+    ]);
+
+    const items = await screen.findByRole('region', { name: 'Items' });
+    await user.click(within(items).getByRole('link', { name: 'Drill' }));
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete Drill?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Delete item' }));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/locations\/garage$/),
+    );
+    const refreshed = await screen.findByRole('region', { name: 'Items' });
+    expect(await within(refreshed).findByRole('link', { name: 'Saw' })).toBeInTheDocument();
+    expect(within(refreshed).queryByRole('link', { name: 'Drill' })).not.toBeInTheDocument();
+    expect(deleted.result).toHaveBeenCalledTimes(1);
+    expect(summaryRefetch.result).toHaveBeenCalledTimes(1);
+    expect(garageRefetch.result).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole('heading', { name: 'Not found' })).not.toBeInTheDocument();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('goes home when the item has no parent', async () => {
+    const user = userEvent.setup();
+    const loose = entityDetail({ id: 'loose', name: 'Loose screw' });
+    renderRoute('/items/loose', [
+      entityMock('loose', loose),
+      summaryMock,
+      spiedMock(DELETE_ENTITY, { id: 'loose' }, { deleteEntity: true }).mock,
+      summary(),
+      entityMock('loose', null),
+      { request: { query: GET_LOCATIONS }, result: { data: { locations: [] } } },
+      { request: { query: GET_ROOT_ITEMS }, result: { data: { rootItems: [] } } },
+    ]);
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    await user.click(screen.getByRole('button', { name: 'Delete item' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'Home' })).toBeInTheDocument();
+    expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/$/);
+  });
+});
+
+describe('ItemPage attachments', () => {
+  const side = attachment({ id: 'p2', title: 'Side' });
+  const withSide = { ...drill, attachments: [photo, side, manual] };
+
+  it('offers Make primary on a non-primary photo only', async () => {
+    renderRoute('/items/drill', [entityMock('drill', withSide), summaryMock]);
+    expect(
+      await screen.findByRole('button', { name: 'Make Side the primary photo' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Make Front the primary photo' }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Make Manual.pdf the primary photo' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('Make primary sends setPrimaryPhoto and shows the new hero photo', async () => {
+    const user = userEvent.setup();
+    const promoted = {
+      ...withSide,
+      attachments: [{ ...photo, primary: false }, { ...side, primary: true }, manual],
+      primaryPhoto: { ...side, primary: true },
+    };
+    const setPrimary = spiedMock(
+      SET_PRIMARY_PHOTO,
+      { attachmentId: 'p2' },
+      { setPrimaryPhoto: promoted },
+    );
+    renderRoute('/items/drill', [
+      entityMock('drill', withSide),
+      summaryMock,
+      setPrimary.mock,
+      summary(),
+      entityMock('drill', promoted),
+    ]);
+    await user.click(await screen.findByRole('button', { name: 'Make Side the primary photo' }));
+    await waitFor(() =>
+      expect(screen.getByRole('img', { name: 'Side' })).toHaveAttribute(
+        'src',
+        '/attachments/p2/thumb/1200?v=abc',
+      ),
+    );
+    expect(setPrimary.result).toHaveBeenCalledTimes(1);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('deletes an attachment after confirming', async () => {
+    const user = userEvent.setup();
+    const withoutManual = { ...withSide, attachments: [photo, side] };
+    const removed = spiedMock(DELETE_ATTACHMENT, { id: 'm1' }, { deleteAttachment: true });
+    renderRoute('/items/drill', [
+      entityMock('drill', withSide),
+      summaryMock,
+      removed.mock,
+      summary(),
+      entityMock('drill', withoutManual),
+    ]);
+    await user.click(await screen.findByRole('button', { name: 'Delete Manual.pdf' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete Manual.pdf?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Delete attachment' }));
+    await waitFor(() =>
+      expect(screen.queryByRole('link', { name: 'Manual.pdf' })).not.toBeInTheDocument(),
+    );
+    // The dialog closes once the delete (and its awaited refetches) resolves.
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(removed.result).toHaveBeenCalledTimes(1);
+    expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/items\/drill$/);
+  });
+
+  it('can delete the hero photo too', async () => {
+    renderRoute('/items/drill', [entityMock('drill', drill), summaryMock]);
+    expect(await screen.findByRole('button', { name: 'Delete Front' })).toBeInTheDocument();
   });
 });

@@ -12,6 +12,10 @@ const LocationPage = React.lazy(() => import('page/LocationPage'));
 const ItemPage = React.lazy(() => import('page/ItemPage'));
 const SearchPage = React.lazy(() => import('page/SearchPage'));
 const NotFound = React.lazy(() => import('page/NotFound'));
+const NewEntityPage = React.lazy(() => import('page/NewEntityPage'));
+const EditEntityPage = React.lazy(() => import('page/EditEntityPage'));
+const EntityTypesPage = React.lazy(() => import('page/EntityTypesPage'));
+const TagsPage = React.lazy(() => import('page/TagsPage'));
 
 const apolloClient = new ApolloClient({
   cache: new InMemoryCache(),
@@ -24,8 +28,14 @@ const routes: RouteObject[] = [
     element: <PageTemplate />,
     children: [
       { index: true, element: <HomePage /> },
+      { path: 'new', element: <NewEntityPage /> },
       { path: 'locations/:id', element: <LocationPage /> },
+      { path: 'locations/:id/new', element: <NewEntityPage /> },
+      { path: 'locations/:id/edit', element: <EditEntityPage /> },
       { path: 'items/:id', element: <ItemPage /> },
+      { path: 'items/:id/edit', element: <EditEntityPage /> },
+      { path: 'types', element: <EntityTypesPage /> },
+      { path: 'tags', element: <TagsPage /> },
       { path: 'search', element: <SearchPage /> },
       { path: '*', element: <NotFound /> },
     ],

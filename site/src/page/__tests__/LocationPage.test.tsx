@@ -1,7 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { screen, within } from '@testing-library/react';
-import { GET_ENTITY, GET_SUMMARY } from 'hooks/queries';
-import { entityDetail, listItem, locationSummary, SUMMARY } from 'test/entityFixtures';
+import { screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { DELETE_ENTITY } from 'hooks/queries';
+import { entityDetail, listItem, locationSummary } from 'test/entityFixtures';
+import { typesMock } from 'test/formFixtures';
+import { entityMock, spiedMock, summaryMock as summary } from 'test/pageMocks';
 import { renderRoute } from 'test/renderRoute';
 
 vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
@@ -9,11 +12,7 @@ import { toast } from 'react-toastify';
 
 beforeEach(() => vi.clearAllMocks());
 
-const summaryMock = { request: { query: GET_SUMMARY }, result: { data: { summary: SUMMARY } } };
-const entityMock = (id: string, entity: unknown) => ({
-  request: { query: GET_ENTITY, variables: { id } },
-  result: { data: { entity } },
-});
+const summaryMock = summary();
 
 const garage = entityDetail(
   {
@@ -39,7 +38,7 @@ const garage = entityDetail(
 
 describe('LocationPage', () => {
   it('shows a loading skeleton, then breadcrumbs, heading, child locations and items', async () => {
-    renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock]);
+    renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock, typesMock()]);
     expect(screen.getByLabelText('Loading location')).toBeInTheDocument();
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Garage' })).toBeInTheDocument();
@@ -59,30 +58,100 @@ describe('LocationPage', () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it('offers a disabled ghost "Add item (coming soon)" placeholder', async () => {
-    renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock]);
-    const button = await screen.findByRole('button', { name: 'Add item (coming soon)' });
-    expect(button).toBeDisabled();
-    expect(button).toHaveAttribute('title', 'Coming in phase 4');
-    expect(button).toHaveClass('border', 'border-border', 'text-muted', 'cursor-not-allowed');
-    expect(button).not.toHaveClass('bg-accent');
+  it('links "Add item" and "Add location" (with the Location type) to the new-entity form', async () => {
+    renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock, typesMock()]);
+    expect(await screen.findByRole('link', { name: 'Add item' })).toHaveAttribute(
+      'href',
+      '/locations/garage/new',
+    );
+    expect(await screen.findByRole('link', { name: 'Add location' })).toHaveAttribute(
+      'href',
+      '/locations/garage/new?type=type-loc',
+    );
+    expect(screen.getByRole('link', { name: 'Edit' })).toHaveAttribute(
+      'href',
+      '/locations/garage/edit',
+    );
+  });
+
+  it('asks before deleting; Cancel sends nothing', async () => {
+    const user = userEvent.setup();
+    const deleted = spiedMock(DELETE_ENTITY, { id: 'garage' }, { deleteEntity: true });
+    renderRoute('/locations/garage', [
+      entityMock('garage', garage),
+      summaryMock,
+      typesMock(),
+      deleted.mock,
+    ]);
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete Garage?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(deleted.result).not.toHaveBeenCalled();
+    expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/locations\/garage$/);
+  });
+
+  it('deleting a location navigates to its parent location', async () => {
+    const user = userEvent.setup();
+    const deleted = spiedMock(DELETE_ENTITY, { id: 'garage' }, { deleteEntity: true });
+    const house = entityDetail({ id: 'house', name: 'House' }, true);
+    renderRoute('/locations/garage', [
+      entityMock('garage', garage),
+      summaryMock,
+      typesMock(),
+      deleted.mock,
+      summary(),
+      typesMock(),
+      entityMock('garage', null),
+      entityMock('house', house),
+    ]);
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    const dialog = screen.getByRole('dialog', { name: 'Delete Garage?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Delete location' }));
+    expect(await screen.findByRole('heading', { level: 1, name: 'House' })).toBeInTheDocument();
+    expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/locations\/house$/);
+    expect(deleted.result).toHaveBeenCalledTimes(1);
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('stays on the page when the delete is refused', async () => {
+    const user = userEvent.setup();
+    renderRoute('/locations/garage', [
+      entityMock('garage', garage),
+      summaryMock,
+      typesMock(),
+      {
+        request: { query: DELETE_ENTITY, variables: { id: 'garage' } },
+        result: { errors: [{ message: 'Garage still contains 2 entities; move them first' }] },
+      },
+    ]);
+    await user.click(await screen.findByRole('button', { name: 'Delete' }));
+    await user.click(screen.getByRole('button', { name: 'Delete location' }));
+    await waitFor(() =>
+      expect(toast.error).toHaveBeenCalledWith(
+        'Could not delete: Garage still contains 2 entities; move them first',
+      ),
+    );
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    expect(screen.getByRole('heading', { level: 1, name: 'Garage' })).toBeInTheDocument();
+    expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/locations\/garage$/);
   });
 
   it('says so when the location has no children and no items', async () => {
     const empty = entityDetail({ id: 'attic', name: 'Attic' }, true);
-    renderRoute('/locations/attic', [entityMock('attic', empty), summaryMock]);
+    renderRoute('/locations/attic', [entityMock('attic', empty), summaryMock, typesMock()]);
     expect(await screen.findByText('Nothing stored here yet.')).toBeInTheDocument();
   });
 
   it('redirects to the item page when the entity is an item', async () => {
     const drill = entityDetail({ id: 'drill', name: 'Drill' });
-    renderRoute('/locations/drill', [entityMock('drill', drill), summaryMock]);
+    renderRoute('/locations/drill', [entityMock('drill', drill), summaryMock, typesMock()]);
     expect(await screen.findByRole('heading', { level: 1, name: 'Drill' })).toBeInTheDocument();
     expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/items\/drill$/);
   });
 
   it('shows Not found when the location does not exist', async () => {
-    renderRoute('/locations/missing', [entityMock('missing', null), summaryMock]);
+    renderRoute('/locations/missing', [entityMock('missing', null), summaryMock, typesMock()]);
     expect(await screen.findByRole('heading', { level: 1, name: 'Not found' })).toBeInTheDocument();
     expect(screen.getByText("That location doesn't exist.")).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Back to home' })).toHaveAttribute('href', '/');

@@ -8,6 +8,10 @@ import { ItemPage } from 'page/ItemPage';
 import { SearchPage } from 'page/SearchPage';
 import { HomePage } from 'page/HomePage';
 import { NotFound } from 'page/NotFound';
+import { NewEntityPage } from 'page/NewEntityPage';
+import { EditEntityPage } from 'page/EditEntityPage';
+import { EntityTypesPage } from 'page/EntityTypesPage';
+import { TagsPage } from 'page/TagsPage';
 
 /**
  * Renders the page routes (mirroring `App.tsx`, minus the shell) at `path`, so a
@@ -21,8 +25,14 @@ export const renderRoute = (path: string, mocks: MockedResponse[]) =>
         <CurrentPath />
         <Routes>
           <Route path="/" element={<HomePage />} />
+          <Route path="/new" element={<NewEntityPage />} />
           <Route path="/locations/:id" element={<LocationPage />} />
+          <Route path="/locations/:id/new" element={<NewEntityPage />} />
+          <Route path="/locations/:id/edit" element={<EditEntityPage />} />
           <Route path="/items/:id" element={<ItemPage />} />
+          <Route path="/items/:id/edit" element={<EditEntityPage />} />
+          <Route path="/types" element={<EntityTypesPage />} />
+          <Route path="/tags" element={<TagsPage />} />
           <Route path="/search" element={<SearchPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>

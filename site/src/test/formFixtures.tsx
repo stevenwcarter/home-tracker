@@ -44,12 +44,12 @@ export const LOCATIONS = [
   locationSummary({ id: 'office', name: 'Office' }),
 ];
 
-export const typesMock = (entityTypes = ENTITY_TYPES): MockedResponse => ({
+export const typesMock = (entityTypes: object[] = ENTITY_TYPES): MockedResponse => ({
   request: { query: GET_ENTITY_TYPES },
   result: { data: { entityTypes } },
 });
 
-export const tagsMock = (tags = TAGS): MockedResponse => ({
+export const tagsMock = (tags: object[] = TAGS): MockedResponse => ({
   request: { query: GET_TAGS },
   result: { data: { tags } },
 });

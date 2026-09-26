@@ -1,5 +1,5 @@
 import { Ref } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, NavLink } from 'react-router-dom';
 import { SearchBox } from 'components/SearchBox';
 import { useTheme } from 'theme/useTheme';
 
@@ -10,6 +10,11 @@ interface AppHeaderProps {
   /** The hamburger button, so closing the drawer can hand focus back to it. */
   hamburgerRef?: Ref<HTMLButtonElement>;
 }
+
+const NAV_LINKS = [
+  { to: '/types', label: 'Types' },
+  { to: '/tags', label: 'Tags' },
+];
 
 export const AppHeader = ({ drawerOpen, onOpenDrawer, hamburgerRef }: AppHeaderProps) => {
   const { theme, toggle } = useTheme();
@@ -30,11 +35,24 @@ export const AppHeader = ({ drawerOpen, onOpenDrawer, hamburgerRef }: AppHeaderP
           Home Tracker
         </Link>
         <SearchBox />
+        <nav aria-label="Main" className="ml-auto flex shrink-0 gap-1">
+          {NAV_LINKS.map(({ to, label }) => (
+            <NavLink
+              key={to}
+              to={to}
+              className={({ isActive }) =>
+                `rounded-md px-2 py-1 text-sm hover:text-text ${isActive ? 'text-accent' : 'text-muted'}`
+              }
+            >
+              {label}
+            </NavLink>
+          ))}
+        </nav>
         <button
           type="button"
           onClick={toggle}
           aria-label={`Switch to ${theme === 'dark' ? 'light' : 'dark'} theme`}
-          className="ml-auto shrink-0 rounded-md border border-border px-3 py-1 text-sm text-muted hover:text-text"
+          className="shrink-0 rounded-md border border-border px-3 py-1 text-sm text-muted hover:text-text"
         >
           {theme === 'dark' ? 'Light' : 'Dark'}
         </button>

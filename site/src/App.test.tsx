@@ -11,6 +11,10 @@ beforeAll(async () => {
     import('page/ItemPage'),
     import('page/SearchPage'),
     import('page/NotFound'),
+    import('page/NewEntityPage'),
+    import('page/EditEntityPage'),
+    import('page/EntityTypesPage'),
+    import('page/TagsPage'),
   ]);
 });
 
@@ -48,4 +52,33 @@ describe('App', () => {
     expect(await screen.findByRole('heading', { level: 1, name: 'Not found' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'Back to home' })).toHaveAttribute('href', '/');
   });
+
+  it('links Types and Tags from the header', async () => {
+    render(<App />);
+    const nav = await screen.findByRole('navigation', { name: 'Main' });
+    expect(within(nav).getByRole('link', { name: 'Types' })).toHaveAttribute('href', '/types');
+    expect(within(nav).getByRole('link', { name: 'Tags' })).toHaveAttribute('href', '/tags');
+  });
+
+  it.each([
+    ['/types', 'Types'],
+    ['/tags', 'Tags'],
+    ['/new', 'New item'],
+    ['/locations/garage/new', 'New item'],
+  ])('routes %s', async (path, heading) => {
+    window.history.pushState({}, '', path);
+    render(<App />);
+    expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
+  });
+
+  it.each(['/items/unknown/edit', '/locations/unknown/edit'])(
+    'routes %s to the edit page (Not found for an unknown id)',
+    async (path) => {
+      window.history.pushState({}, '', path);
+      render(<App />);
+      expect(
+        await screen.findByRole('heading', { level: 1, name: 'Not found' }),
+      ).toBeInTheDocument();
+    },
+  );
 });
