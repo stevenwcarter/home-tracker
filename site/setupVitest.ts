@@ -87,9 +87,31 @@ const DEFAULT_GRAPHQL_DATA: Record<string, unknown> = {
   DeleteAttachment: { deleteAttachment: true },
 };
 
+// Default answer for `POST /api/upload/{entityId}`: a stored, non-primary
+// photo. A test that asserts on the request or needs another status stubs
+// `fetch` itself (`vi.mocked(fetch).mockImplementation`).
+const uploadedPhoto = (entityId: string) => ({
+  id: `uploaded-to-${entityId}`,
+  kind: 'PHOTO',
+  primary: false,
+  title: 'photo.jpg',
+  mimeType: 'image/jpeg',
+  sizeBytes: 1024,
+  url: '/attachments/uploaded?v=0000000000000000',
+  thumbnailUrl: '/attachments/uploaded/thumb/500?v=0000000000000000',
+});
+
 beforeEach(() => {
   fetchMocker.resetMocks();
-  fetchMocker.mockIf(/\/graphql$/, async (request) => {
+  fetchMocker.mockIf(/\/graphql$|\/api\/upload\//, async (request) => {
+    const upload = /\/api\/upload\/([^/?]+)/.exec(request.url);
+    if (upload) {
+      return {
+        status: 201,
+        body: JSON.stringify(uploadedPhoto(decodeURIComponent(upload[1]))),
+        headers: { 'content-type': 'application/json' },
+      };
+    }
     const { operationName } = await request.json();
     const body =
       operationName in DEFAULT_GRAPHQL_DATA

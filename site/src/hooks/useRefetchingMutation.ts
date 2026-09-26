@@ -1,4 +1,4 @@
-import type { ApolloCache, DocumentNode, OperationVariables } from '@apollo/client';
+import type { ApolloCache, ApolloClient, DocumentNode, OperationVariables } from '@apollo/client';
 import { useApolloClient, useMutation } from '@apollo/client/react';
 import { useCallback, useEffect, useRef } from 'react';
 
@@ -54,6 +54,32 @@ function evictStale(cache: ApolloCache, ids: EntityIds, inactive: readonly strin
   cache.gc();
 }
 
+/** The names of the queries currently mounted; resolved at completion, not render. */
+const activeQueryNames = (client: ApolloClient): Set<string> =>
+  new Set([...client.getObservableQueries('active')].map((query) => query.queryName ?? ''));
+
+/**
+ * The same refetch policy for a write that did not go through Apollo (the
+ * `fetch`-based photo upload): evicts the `Entity` entries in `ids`, the root
+ * field of each query in `refetch` that is not active, and every cached
+ * search, then refetches the ones in `refetch` that are active and resolves
+ * once they land. Evicting first matters for the same reason as below.
+ */
+export async function refetchAfterWrite(
+  client: ApolloClient,
+  refetch: readonly string[],
+  ids: EntityIds,
+): Promise<void> {
+  const active = activeQueryNames(client);
+  evictStale(
+    client.cache,
+    ids,
+    refetch.filter((name) => !active.has(name)),
+  );
+  const include = refetch.filter((name) => active.has(name));
+  if (include.length > 0) await client.refetchQueries({ include });
+}
+
 /**
  * `useMutation` plus this app's refetch policy. On success it evicts the
  * `Entity` entries named by `evict` (and by the call's `alsoEvict`, for ids
@@ -84,10 +110,7 @@ export function useRefetchingMutation<TData, TVariables extends OperationVariabl
     refetchRef.current = refetch;
   }, [evict, refetch]);
   // Resolved at completion, not render: naming an inactive query makes Apollo warn.
-  const activeNames = useCallback(
-    () => new Set([...client.getObservableQueries('active')].map((query) => query.queryName)),
-    [client],
-  );
+  const activeNames = useCallback(() => activeQueryNames(client), [client]);
   const [mutate, { loading, error }] = useMutation<TData, TVariables>(mutation, {
     awaitRefetchQueries: true,
     refetchQueries: () => {

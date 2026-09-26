@@ -1,3 +1,4 @@
+import { isHexColor } from 'utils/color';
 import { TagRef } from 'types/entity';
 
 export const TagChips = ({ tags }: { tags: TagRef[] }) =>
@@ -8,7 +9,7 @@ export const TagChips = ({ tags }: { tags: TagRef[] }) =>
           key={tag.id}
           className="flex items-center gap-1.5 rounded-full border border-border bg-surface-raised px-3 py-0.5 text-sm text-text"
         >
-          {tag.color && (
+          {isHexColor(tag.color) && (
             <span
               aria-hidden="true"
               className="inline-block h-2 w-2 rounded-full"

@@ -33,6 +33,19 @@ describe('TagsPage', () => {
     expect(within(row('Power tools')).getByText('Tools')).toBeInTheDocument();
   });
 
+  // Imported tags skip the server's hex check, so the swatch guards itself.
+  it('draws no swatch colour for a value that is not a hex colour', async () => {
+    const odd = { ...tagWire('odd', 'Odd'), color: 'url(https://example.com/pixel.png)' };
+    const named = { ...tagWire('named', 'Named'), color: 'red' };
+    renderRoute('/tags', [tagsMock([tools, odd, named])]);
+    await screen.findByRole('cell', { name: /Odd/ });
+    expect(within(row('Odd')).getByTestId('swatch-odd').getAttribute('style')).toBeNull();
+    expect(within(row('Named')).getByTestId('swatch-named').getAttribute('style')).toBeNull();
+    expect(within(row('Tools')).getByTestId('swatch-tools')).toHaveStyle({
+      background: '#ff8800',
+    });
+  });
+
   it('creates a tag with a colour and a parent', async () => {
     const user = userEvent.setup();
     const input = {

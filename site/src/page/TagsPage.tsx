@@ -11,6 +11,7 @@ import { Section } from 'components/Section';
 import { useCreateTag, useDeleteTag, useUpdateTag } from 'hooks/useTagMutations';
 import { useTags } from 'hooks/useTags';
 import { TagDetail, TagInput } from 'types/entity';
+import { isHexColor } from 'utils/color';
 import { plural } from 'utils/plural';
 
 interface Draft {
@@ -54,12 +55,15 @@ const subtreeOf = (id: string, tags: TagDetail[]): Set<string> => {
   return subtree;
 };
 
-/** A colour chip; the colour is the user's own data, hence the inline style. */
+/**
+ * A colour chip; the colour is the user's own data, hence the inline style,
+ * drawn only for a valid hex value (imported tags skip the server's check).
+ */
 const Swatch = ({ tag }: { tag: TagDetail }) => (
   <span
     aria-hidden="true"
     data-testid={`swatch-${tag.id}`}
-    style={tag.color ? { background: tag.color } : undefined}
+    style={isHexColor(tag.color) ? { background: tag.color } : undefined}
     className="inline-block h-3 w-3 shrink-0 rounded-full border border-border"
   />
 );

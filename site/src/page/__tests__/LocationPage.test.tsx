@@ -180,3 +180,38 @@ describe('LocationPage', () => {
     expect(screen.getByRole('link', { name: 'Back to home' })).toHaveAttribute('href', '/');
   });
 });
+
+describe('LocationPage photos', () => {
+  it('shows the gallery and the uploader', async () => {
+    const shelfPhoto = {
+      __typename: 'Attachment',
+      id: 'lp1',
+      kind: 'PHOTO',
+      primary: true,
+      title: 'Garage door',
+      mimeType: 'image/jpeg',
+      url: '/attachments/lp1?v=abc',
+      thumbnailUrl: '/attachments/lp1/thumb/500?v=abc',
+    };
+    renderRoute('/locations/garage', [
+      entityMock('garage', { ...garage, attachments: [shelfPhoto], primaryPhoto: shelfPhoto }),
+      summaryMock,
+      typesMock(),
+    ]);
+    const photos = await screen.findByRole('region', { name: 'Photos' });
+    expect(within(photos).getByRole('img', { name: 'Garage door' })).toHaveAttribute(
+      'src',
+      '/attachments/lp1/thumb/300?v=abc',
+    );
+    expect(within(photos).getByText('Primary')).toBeInTheDocument();
+    expect(within(photos).getByRole('button', { name: 'Add photos' })).toBeInTheDocument();
+    expect(within(photos).getByRole('group', { name: 'Photo upload' })).toBeInTheDocument();
+  });
+
+  it('offers the uploader on a location with no photos', async () => {
+    renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock, typesMock()]);
+    const photos = await screen.findByRole('region', { name: 'Photos' });
+    expect(within(photos).getByText('No photos yet.')).toBeInTheDocument();
+    expect(within(photos).getByRole('button', { name: 'Add photos' })).toBeInTheDocument();
+  });
+});

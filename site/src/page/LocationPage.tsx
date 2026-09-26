@@ -4,6 +4,8 @@ import { DANGER_ACTION, PRIMARY_ACTION, SECONDARY_ACTION } from 'components/butt
 import { EntityList } from 'components/EntityList';
 import { LocationCards } from 'components/LocationCards';
 import { PageSkeleton } from 'components/PageSkeleton';
+import { PhotoGallery } from 'components/PhotoGallery';
+import { PhotoUploader } from 'components/PhotoUploader';
 import { Section } from 'components/Section';
 import { useCurrency } from 'hooks/useCurrency';
 import { useEntity } from 'hooks/useEntity';
@@ -11,6 +13,7 @@ import { useEntityTypes } from 'hooks/useEntityTypes';
 import { NotFound } from 'page/NotFound';
 import { EntityDetail } from 'types/entity';
 import { locationType } from 'types/builtIns';
+import { isGalleryPhoto } from 'utils/photos';
 import { plural } from 'utils/plural';
 import { useEntityDeletion } from './useEntityDeletion';
 
@@ -84,6 +87,11 @@ export const LocationPage = () => {
         </Section>
       )}
       {blocker === null && <p className="mt-8 text-muted">Nothing stored here yet.</p>}
+      <Section title="Photos">
+        <PhotoUploader entity={entity}>
+          <PhotoGallery photos={entity.attachments.filter(isGalleryPhoto)} />
+        </PhotoUploader>
+      </Section>
       {dialog}
     </section>
   );

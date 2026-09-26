@@ -12,6 +12,8 @@ import { DetailRow, DetailsGrid } from 'components/DetailsGrid';
 import { EntityList } from 'components/EntityList';
 import { LocationCards } from 'components/LocationCards';
 import { PageSkeleton } from 'components/PageSkeleton';
+import { PhotoGallery } from 'components/PhotoGallery';
+import { PhotoUploader } from 'components/PhotoUploader';
 import { Section } from 'components/Section';
 import { TagChips } from 'components/TagChips';
 import { Thumb } from 'components/Thumb';
@@ -22,6 +24,7 @@ import { NotFound } from 'page/NotFound';
 import { AttachmentRef, EntityDetail, EntityFieldRef } from 'types/entity';
 import { formatCents } from 'utils/currency';
 import { formatDate, formatDateTime } from 'utils/date';
+import { isGalleryPhoto } from 'utils/photos';
 import { useEntityDeletion } from './useEntityDeletion';
 
 /**
@@ -152,7 +155,9 @@ export const ItemPage = () => {
   if (entity.isLocation) return <Navigate to={`/locations/${id}`} replace />;
 
   const photo = heroPhoto(entity);
-  const otherAttachments = entity.attachments.filter((attachment) => attachment.id !== photo?.id);
+  const photos = entity.attachments.filter(isGalleryPhoto);
+  // Photos are managed in the gallery; everything else is listed as a file.
+  const otherAttachments = entity.attachments.filter((attachment) => !isGalleryPhoto(attachment));
   const attachmentActions = (attachment: AttachmentRef) => (
     <AttachmentActions
       attachment={attachment}
@@ -178,12 +183,11 @@ export const ItemPage = () => {
       </div>
       <div className="mt-6 grid grid-cols-1 gap-8 lg:grid-cols-2">
         {photo && (
-          <div>
+          <figure aria-label="Featured photo">
             <a href={photo.url} className="block">
               <Thumb attachment={photo} size={1200} className="w-full" />
             </a>
-            {attachmentActions(photo)}
-          </div>
+          </figure>
         )}
         <div className="space-y-6">
           <section aria-label="Details">
@@ -209,6 +213,11 @@ export const ItemPage = () => {
           </div>
         </Section>
       )}
+      <Section title="Photos">
+        <PhotoUploader entity={entity}>
+          <PhotoGallery photos={photos} />
+        </PhotoUploader>
+      </Section>
       {otherAttachments.length > 0 && (
         <Section title="Attachments">
           <ul className="flex flex-wrap gap-4">

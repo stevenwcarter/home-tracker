@@ -36,6 +36,10 @@ const attachment = (overrides: Partial<AttachmentRef> & Pick<AttachmentRef, 'id'
   }) as AttachmentRef;
 
 const photo = attachment({ id: 'p1', primary: true, title: 'Front' });
+
+/** The large photo beside the details (the gallery shows the same photo again at 300). */
+const featured = () =>
+  within(screen.getByRole('figure', { name: 'Featured photo' })).getByRole('img');
 const manual = attachment({
   id: 'm1',
   kind: 'MANUAL',
@@ -119,7 +123,7 @@ describe('ItemPage', () => {
     expect(valueOf('Field NUMBER')).toHaveTextContent('7');
     expect(valueOf('Field BOOLEAN')).toHaveTextContent('Yes');
     expect(valueOf('Field TIME')).toHaveTextContent('Mar 4, 2026');
-    expect(screen.getByRole('img', { name: 'Front' })).toBeInTheDocument();
+    expect(featured()).toHaveAccessibleName('Front');
     const attachments = screen.getByRole('region', { name: 'Attachments' });
     for (const kind of nonPhotoKinds) {
       expect(within(attachments).getByRole('link', { name: `${kind} file` })).toBeInTheDocument();
@@ -133,10 +137,8 @@ describe('ItemPage', () => {
     expect(screen.getByRole('navigation', { name: 'Breadcrumb' })).toHaveTextContent(
       'Home/House/Garage/Drill',
     );
-    expect(screen.getByRole('img', { name: 'Front' })).toHaveAttribute(
-      'src',
-      '/attachments/p1/thumb/1200?v=abc',
-    );
+    expect(featured()).toHaveAccessibleName('Front');
+    expect(featured()).toHaveAttribute('src', '/attachments/p1/thumb/1200?v=abc');
     expect(toast.error).not.toHaveBeenCalled();
   });
 
@@ -178,10 +180,9 @@ describe('ItemPage', () => {
     const other = attachment({ id: 'p2', title: 'Side' });
     const noPrimary = { ...drill, primaryPhoto: null, attachments: [manual, other] };
     renderRoute('/items/drill', [entityMock('drill', noPrimary), summaryMock]);
-    expect(await screen.findByRole('img', { name: 'Side' })).toHaveAttribute(
-      'src',
-      '/attachments/p2/thumb/1200?v=abc',
-    );
+    await screen.findByRole('figure', { name: 'Featured photo' });
+    expect(featured()).toHaveAccessibleName('Side');
+    expect(featured()).toHaveAttribute('src', '/attachments/p2/thumb/1200?v=abc');
   });
 
   it('lists an attachment without a thumbnail by title, even when its MIME type is an image', async () => {
@@ -357,11 +358,9 @@ describe('ItemPage attachments', () => {
     ]);
     await user.click(await screen.findByRole('button', { name: 'Make Side the primary photo' }));
     await waitFor(() =>
-      expect(screen.getByRole('img', { name: 'Side' })).toHaveAttribute(
-        'src',
-        '/attachments/p2/thumb/1200?v=abc',
-      ),
+      expect(featured()).toHaveAttribute('src', '/attachments/p2/thumb/1200?v=abc'),
     );
+    expect(featured()).toHaveAccessibleName('Side');
     expect(setPrimary.result).toHaveBeenCalledTimes(1);
     expect(toast.error).not.toHaveBeenCalled();
   });
@@ -392,5 +391,73 @@ describe('ItemPage attachments', () => {
   it('can delete the hero photo too', async () => {
     renderRoute('/items/drill', [entityMock('drill', drill), summaryMock]);
     expect(await screen.findByRole('button', { name: 'Delete Front' })).toBeInTheDocument();
+  });
+});
+
+describe('ItemPage photos', () => {
+  const side = attachment({ id: 'p2', title: 'Side' });
+  const receipt = attachment({ id: 'r1', kind: 'RECEIPT', title: 'Receipt.png' });
+  const withPhotos = { ...drill, attachments: [photo, side, manual, receipt] };
+
+  it('shows the gallery of photos and the uploader, keeping the featured photo', async () => {
+    renderRoute('/items/drill', [entityMock('drill', withPhotos), summaryMock]);
+    const photos = await screen.findByRole('region', { name: 'Photos' });
+    const gallery = within(photos).getByRole('list', { name: 'Photos' });
+    expect(within(gallery).getAllByRole('listitem')).toHaveLength(2);
+    expect(within(gallery).getByRole('img', { name: 'Front' })).toHaveAttribute(
+      'src',
+      '/attachments/p1/thumb/300?v=abc',
+    );
+    expect(within(gallery).getByText('Primary')).toBeInTheDocument();
+    expect(within(photos).getByRole('button', { name: 'Add photos' })).toBeInTheDocument();
+    expect(within(photos).getByRole('group', { name: 'Photo upload' })).toBeInTheDocument();
+    // The hero is unchanged: the primary photo, large, linking to the original.
+    expect(featured()).toHaveAttribute('src', '/attachments/p1/thumb/1200?v=abc');
+    expect(featured().closest('a')).toHaveAttribute('href', '/attachments/p1?v=abc');
+    // Non-photo attachments (even an image receipt) stay in the file list.
+    const files = screen.getByRole('region', { name: 'Attachments' });
+    expect(within(files).getByRole('link', { name: 'Manual.pdf' })).toBeInTheDocument();
+    expect(within(files).getByRole('img', { name: 'Receipt.png' })).toBeInTheDocument();
+    expect(within(files).queryByRole('img', { name: 'Side' })).not.toBeInTheDocument();
+  });
+
+  it('uploads a chosen file and shows it once the entity refetches', async () => {
+    const user = userEvent.setup();
+    const uploaded = attachment({ id: 'p9', title: 'Back' });
+    const refetched = spiedMock(
+      GET_ENTITY,
+      { id: 'drill' },
+      { entity: { ...withPhotos, attachments: [photo, side, uploaded, manual] } },
+    );
+    renderRoute('/items/drill', [
+      entityMock('drill', withPhotos),
+      summaryMock,
+      refetched.mock,
+      summary(),
+    ]);
+    const input = await screen.findByLabelText('Photo files');
+    const file = new File(['jpeg'], 'back.jpg', { type: 'image/jpeg' });
+    await user.upload(input, file);
+
+    const gallery = await screen.findByRole('list', { name: 'Photos' });
+    expect(await within(gallery).findByRole('img', { name: 'Back' })).toBeInTheDocument();
+    expect(refetched.result).toHaveBeenCalledTimes(1);
+    const [url, init] = vi.mocked(fetch).mock.calls[0];
+    expect(url).toBe('/api/upload/drill');
+    expect((init?.body as FormData).get('file')).toBe(file);
+    const status = screen.getByRole('list', { name: 'Upload status' });
+    expect(within(status).getByText('back.jpg').closest('li')).toHaveTextContent('Uploaded');
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('shows an empty gallery with the uploader when the item has no photos', async () => {
+    renderRoute('/items/drill', [
+      entityMock('drill', { ...drill, attachments: [manual], primaryPhoto: null }),
+      summaryMock,
+    ]);
+    const photos = await screen.findByRole('region', { name: 'Photos' });
+    expect(within(photos).getByText('No photos yet.')).toBeInTheDocument();
+    expect(within(photos).getByRole('button', { name: 'Add photos' })).toBeInTheDocument();
+    expect(screen.queryByRole('figure', { name: 'Featured photo' })).not.toBeInTheDocument();
   });
 });
