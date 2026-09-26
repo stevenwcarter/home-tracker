@@ -102,6 +102,55 @@ describe('buildLocationTree', () => {
     expect(allIds.sort()).toEqual(['a', 'b', 'd', 'e']);
   });
 
+  // nesting_does_not_depend_on_name_order (Task 4 re-review, blocking): a
+  // descendant that alphabetically sorts *before* its cycle-member parent
+  // must still nest under it, not get promoted as its own root just because
+  // the leftover walk reaches it first in name order.
+  it('nests a descendant under its real parent regardless of name order', () => {
+    const locations = [
+      loc('alpha', 'Alpha', 'zulu'),
+      loc('yankee', 'Yankee', 'zulu'),
+      loc('zulu', 'Zulu', 'yankee'),
+    ];
+
+    const tree = buildLocationTree(locations);
+
+    expect(tree.map((n) => n.location.id)).toEqual(['yankee', 'zulu']);
+    const byId = new Map(tree.map((n) => [n.location.id, n]));
+    expect(byId.get('zulu')?.children.map((n) => n.location.id)).toEqual(['alpha']);
+    expect(byId.get('yankee')?.children).toEqual([]);
+  });
+
+  // a_self_parented_node_keeps_its_earlier_named_child (Task 4 re-review,
+  // blocking): same as above, for the self-parented (1-node cycle) case.
+  it('keeps a self-parented location child even when the child sorts first', () => {
+    const locations = [loc('aaa', 'Aaa', 's'), loc('s', 'S', 's')];
+
+    const tree = buildLocationTree(locations);
+
+    expect(tree.map((n) => n.location.id)).toEqual(['s']);
+    expect(tree[0].children.map((n) => n.location.id)).toEqual(['aaa']);
+  });
+
+  // a_three_cycle_keeps_an_earlier_named_descendant (Task 4 re-review,
+  // blocking): same again for a longer, 3-member cycle.
+  it('keeps an earlier-named descendant nested under its parent in a three-member cycle', () => {
+    const locations = [
+      loc('aaa', 'Aaa', 'xi'),
+      loc('zed', 'Zed', 'yak'),
+      loc('yak', 'Yak', 'xi'),
+      loc('xi', 'Xi', 'zed'),
+    ];
+
+    const tree = buildLocationTree(locations);
+
+    expect(tree.map((n) => n.location.id)).toEqual(['xi', 'yak', 'zed']);
+    const byId = new Map(tree.map((n) => [n.location.id, n]));
+    expect(byId.get('xi')?.children.map((n) => n.location.id)).toEqual(['aaa']);
+    expect(byId.get('yak')?.children).toEqual([]);
+    expect(byId.get('zed')?.children).toEqual([]);
+  });
+
   it('returns [] for an empty input', () => {
     expect(buildLocationTree([])).toEqual([]);
   });
