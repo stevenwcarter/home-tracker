@@ -88,14 +88,15 @@ still pick up new bytes after a re-import; each response also sets a matching
 A location page has Add item, Add location, Edit and Delete buttons; an item
 page has Edit and Delete. "Add" opens `/locations/:id/new` with the type
 preselected (`?type=` picks Location over the default Item). `/new` creates
-a parentless entity the same way, for a future top-level entry point. Edit
+a parentless entity the same way; the home page's Add location and Add item
+links open it. Edit
 opens `/locations/:id/edit` or `/items/:id/edit`. All these routes render the
 same `EntityForm`, split into Basics, Purchase, Warranty, Sold and Details
 sections; Purchase, Warranty and Sold start collapsed when the selected type
 is a location. Saving a create or edit goes to the entity's own page.
 
 Delete never uses the browser's `confirm()`; it opens an in-app confirmation
-dialog. Deleting an item or location navigates to its parent location, or
+dialog. A location's Delete is disabled while it still holds anything. Deleting an item or location navigates to its parent location, or
 home if it had none. On an item page, each attachment also has its own
 Delete and, for a photo that is not already primary, Make primary.
 
@@ -107,14 +108,17 @@ use it, and let you create, edit in place, and delete from the same table.
 - An unknown entity type, parent id, or tag id.
 - Placing a location under an item (items may nest under items, but a
   location may not).
-- Moving an entity under itself or one of its own descendants.
+- Moving an entity under itself or one of its own descendants, or
+  reparenting a tag under itself or one of its own descendants (a cycle).
 - A negative quantity or a negative purchase/sold price.
 - Deleting an entity that still contains other entities; the error names how
   many.
 - Deleting an entity type that is one of the built-in Location/Item types, or
   still used by any entity; the error names the type or the count.
 - Turning a location type into a non-location type while any entity of that
-  type still holds a location child.
+  type still holds a location child, or turning a type into a location type
+  while any entity of that type sits inside an item of another type.
+- A tag colour that is not a hex value (`#rgb`, `#rrggbb` or `#rrggbbaa`).
 
 ## Project layout
 

@@ -90,7 +90,7 @@ Never a raw palette class like `bg-zinc-900`. A theme is exactly one block of `-
 
 **Mutations gate on `ctx.require_write()`**: all eleven `Mutation` resolvers (`graphql/mutation.rs`) call it first, before any input is parsed; a `Role::ReadOnly` actor gets `Forbidden` and no row changes. `Actor::Anonymous` can write in v1; auth later fills the actor.
 
-**Frontend refetch and eviction**: every mutation hook builds on `useRefetchingMutation` (`hooks/useRefetchingMutation.ts`), which refetches `GetLocations`, `GetSummary`, `GetRootItems`, `GetEntityTypes`, `GetTags` and `GetEntity` for the affected id, and on a move also evicts the old and new parent `Entity:<id>` cache entries before `cache.gc()`.
+**Frontend refetch and eviction**: every mutation hook builds on `useRefetchingMutation` (`hooks/useRefetchingMutation.ts`) with a list of `GetLocations`, `GetSummary`, `GetRootItems`, `GetEntityTypes`, `GetTags` (plus `GetEntity`): after any write, active queries in the list are refetched and inactive ones have their root field evicted (every cached `search` too); create, update and delete all evict the affected entity's parent(s) (`Entity:<id>`, both parents on a move) before `cache.gc()`.
 
 **`EntityForm` is shared** (`components/EntityForm.tsx`) between create and edit, keyed by the entity's id in edit mode so a different entity remounts it instead of reusing stale state; parent and tags go through `LocationPicker`/`TagPicker`.
 
