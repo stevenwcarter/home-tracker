@@ -8,10 +8,12 @@ pub mod entity_field;
 pub mod entity_type;
 pub mod fixtures;
 pub mod settings;
+pub mod sniff;
 pub mod stats;
 pub mod tag;
 pub mod thumbnail;
 pub mod thumbnail_service;
+pub mod upload;
 
 /// `name` with surrounding whitespace removed; blank names are refused.
 /// Every named aggregate (entities, types, tags) goes through this.

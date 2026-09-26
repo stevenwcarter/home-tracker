@@ -26,7 +26,9 @@ const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 
 /// Decoder bounds. A small file can declare enormous dimensions, so the
 /// header is checked against these before any pixel buffer is allocated.
-fn decode_limits() -> Limits {
+/// Uploads are refused against the same bounds, so every stored photo can
+/// be thumbnailed.
+pub(crate) fn decode_limits() -> Limits {
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_DECODE_EDGE);
     limits.max_image_height = Some(MAX_DECODE_EDGE);
@@ -59,9 +61,21 @@ pub fn generate_bytes(original: &[u8], size: u32) -> Result<Generated> {
     })
 }
 
+/// One of the allowed thumbnail box sizes, in pixels. Only [`allowed_size`]
+/// makes one, so a size that reaches the thumbnail service is always valid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ThumbSize(u32);
+
+impl ThumbSize {
+    /// The box edge in pixels.
+    pub fn get(self) -> u32 {
+        self.0
+    }
+}
+
 /// Allowed thumbnail box sizes, ascending. A request rounds up to the first
 /// size that is at least as large; larger requests clamp to the last.
-pub const THUMB_SIZES: [u32; 3] = [300, 500, 1200];
+const THUMB_SIZES: [ThumbSize; 3] = [ThumbSize(300), ThumbSize(500), ThumbSize(1200)];
 
 /// Whether `mime` is a type this service can generate a thumbnail for.
 pub fn is_thumbnailable(mime: &str) -> bool {
@@ -71,46 +85,27 @@ pub fn is_thumbnailable(mime: &str) -> bool {
     )
 }
 
-/// The [`THUMB_SIZES`] entry to serve for a requested size, or `None` when
+/// The [`ThumbSize`] to serve for a requested size, or `None` when
 /// `requested` is not positive.
-pub fn allowed_size(requested: i64) -> Option<u32> {
+pub fn allowed_size(requested: i64) -> Option<ThumbSize> {
     if requested <= 0 {
         return None;
     }
     let wanted = u32::try_from(requested).unwrap_or(u32::MAX);
     Some(
         THUMB_SIZES
-            .iter()
-            .copied()
-            .find(|s| *s >= wanted)
+            .into_iter()
+            .find(|s| s.0 >= wanted)
             .unwrap_or(THUMB_SIZES[THUMB_SIZES.len() - 1]),
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use image::{DynamicImage, ImageEncoder, ImageError, RgbImage};
-    use std::io::Cursor;
+    use image::{DynamicImage, ImageError};
 
     use super::*;
-
-    fn jpeg(w: u32, h: u32) -> Vec<u8> {
-        let img = RgbImage::from_fn(w, h, |x, _| image::Rgb([(x % 256) as u8, 40, 200]));
-        let mut out = Vec::new();
-        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut out, 90)
-            .write_image(&img, w, h, image::ExtendedColorType::Rgb8)
-            .unwrap();
-        out
-    }
-
-    fn png(w: u32, h: u32) -> Vec<u8> {
-        let img = RgbImage::from_pixel(w, h, image::Rgb([10, 200, 30]));
-        let mut out = Vec::new();
-        DynamicImage::ImageRgb8(img)
-            .write_to(&mut Cursor::new(&mut out), image::ImageFormat::Png)
-            .unwrap();
-        out
-    }
+    use crate::svc::fixtures::{jpeg, png, png_header};
 
     /// Inserts an APP1 Exif segment carrying only Orientation = `orientation`
     /// right after the SOI marker. Layout: FF E1, length, "Exif\0\0", TIFF header
@@ -173,46 +168,6 @@ mod tests {
         assert_eq!((plain.width, plain.height), (400, 200));
     }
 
-    /// The CRC-32 (IEEE) of `bytes`, bit by bit: enough to frame a PNG chunk.
-    fn crc32(bytes: &[u8]) -> u32 {
-        let mut crc = !0u32;
-        for &byte in bytes {
-            crc ^= u32::from(byte);
-            for _ in 0..8 {
-                crc = if crc & 1 == 1 {
-                    (crc >> 1) ^ 0xEDB8_8320
-                } else {
-                    crc >> 1
-                };
-            }
-        }
-        !crc
-    }
-
-    fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
-        out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
-        let start = out.len();
-        out.extend_from_slice(kind);
-        out.extend_from_slice(data);
-        let crc = crc32(&out[start..]);
-        out.extend_from_slice(&crc.to_be_bytes());
-    }
-
-    /// A well-framed PNG whose IHDR claims `w`×`h` 8-bit greyscale pixels but
-    /// which carries no pixel data.
-    fn png_header(w: u32, h: u32) -> Vec<u8> {
-        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
-        let mut ihdr = Vec::new();
-        ihdr.extend_from_slice(&w.to_be_bytes());
-        ihdr.extend_from_slice(&h.to_be_bytes());
-        // Bit depth 8, greyscale, deflate, adaptive filtering, no interlace.
-        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
-        png_chunk(&mut out, b"IHDR", &ihdr);
-        png_chunk(&mut out, b"IDAT", &[]);
-        png_chunk(&mut out, b"IEND", &[]);
-        out
-    }
-
     #[test]
     fn oversized_dimensions_are_rejected_by_limits() {
         // 20000×20000 greyscale is 400 MB: under the crate's 512 MiB default
@@ -234,16 +189,17 @@ mod tests {
 
     #[test]
     fn rounds_up_and_clamps() {
-        assert_eq!(allowed_size(1), Some(300));
-        assert_eq!(allowed_size(300), Some(300));
-        assert_eq!(allowed_size(301), Some(500));
-        assert_eq!(allowed_size(500), Some(500));
-        assert_eq!(allowed_size(501), Some(1200));
-        assert_eq!(allowed_size(1200), Some(1200));
-        assert_eq!(allowed_size(9999), Some(1200));
-        assert_eq!(allowed_size(i64::MAX), Some(1200));
-        assert_eq!(allowed_size(0), None);
-        assert_eq!(allowed_size(-5), None);
+        let px = |requested| allowed_size(requested).map(ThumbSize::get);
+        assert_eq!(px(1), Some(300));
+        assert_eq!(px(300), Some(300));
+        assert_eq!(px(301), Some(500));
+        assert_eq!(px(500), Some(500));
+        assert_eq!(px(501), Some(1200));
+        assert_eq!(px(1200), Some(1200));
+        assert_eq!(px(9999), Some(1200));
+        assert_eq!(px(i64::MAX), Some(1200));
+        assert_eq!(px(0), None);
+        assert_eq!(px(-5), None);
     }
 
     #[test]

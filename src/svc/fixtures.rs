@@ -5,8 +5,12 @@
 //! 4 items (Drill, Screws, Old TV, Loose item), 4 locations (House, Garage,
 //! Tote A, Attic) and 2 tags. Test-only code: failures panic.
 
+use std::io::Cursor;
+
 use chrono::{DateTime, NaiveDate, NaiveDateTime};
 use diesel::prelude::*;
+use image::codecs::jpeg::JpegEncoder;
+use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, Rgb, RgbImage};
 
 use crate::asset_id::AssetId;
 use crate::db::{ITEM_TYPE_ID, LOCATION_TYPE_ID};
@@ -260,4 +264,66 @@ pub fn seed_sample(conn: &mut SqliteConnection) -> SampleIds {
         .expect("insert sample custom field");
 
     ids
+}
+
+/// A `w × h` JPEG with a horizontal gradient, so the encoder has real content.
+pub fn jpeg(w: u32, h: u32) -> Vec<u8> {
+    let img = RgbImage::from_fn(w, h, |x, _| Rgb([(x % 256) as u8, 40, 200]));
+    let mut out = Vec::new();
+    JpegEncoder::new_with_quality(&mut out, 90)
+        .write_image(&img, w, h, ExtendedColorType::Rgb8)
+        .expect("encode fixture JPEG");
+    out
+}
+
+/// A solid `w × h` PNG.
+pub fn png(w: u32, h: u32) -> Vec<u8> {
+    let img = RgbImage::from_pixel(w, h, Rgb([10, 200, 30]));
+    let mut out = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(img)
+        .write_to(&mut out, ImageFormat::Png)
+        .expect("encode fixture PNG");
+    out.into_inner()
+}
+
+/// A well-framed PNG whose IHDR claims `w`×`h` 8-bit greyscale pixels but
+/// which carries no pixel data: a small file with enormous declared
+/// dimensions, for exercising the decoder limits.
+pub fn png_header(w: u32, h: u32) -> Vec<u8> {
+    let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+    let mut ihdr = Vec::new();
+    ihdr.extend_from_slice(&w.to_be_bytes());
+    ihdr.extend_from_slice(&h.to_be_bytes());
+    // Bit depth 8, greyscale, deflate, adaptive filtering, no interlace.
+    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    png_chunk(&mut out, b"IHDR", &ihdr);
+    png_chunk(&mut out, b"IDAT", &[]);
+    png_chunk(&mut out, b"IEND", &[]);
+    out
+}
+
+fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+    let len = u32::try_from(data.len()).expect("PNG chunk length fits in u32");
+    out.extend_from_slice(&len.to_be_bytes());
+    let start = out.len();
+    out.extend_from_slice(kind);
+    out.extend_from_slice(data);
+    let crc = crc32(&out[start..]);
+    out.extend_from_slice(&crc.to_be_bytes());
+}
+
+/// The CRC-32 (IEEE) of `bytes`, bit by bit: enough to frame a PNG chunk.
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 {
+                (crc >> 1) ^ 0xEDB8_8320
+            } else {
+                crc >> 1
+            };
+        }
+    }
+    !crc
 }

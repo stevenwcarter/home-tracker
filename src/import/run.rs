@@ -37,6 +37,7 @@ use crate::schema::{
     attachments, entities, entity_fields, entity_templates, entity_types, tag_entities, tags,
     template_fields, thumbnails,
 };
+use crate::svc::tag;
 
 const SUPPORTED_SCHEMA_VERSION: i64 = 1;
 /// Homebox's stored thumbnails are 500px renditions; we keep them at that size.
@@ -378,6 +379,15 @@ fn import_tags(
     for row in rows {
         let (created_at, updated_at) =
             stamps(&row.created_at, &row.updated_at, format!("tag {}", row.id))?;
+        let color = tag::optional_color(row.color.clone()).unwrap_or_else(|e| {
+            report.warn(format!(
+                "tag {} ({}): {e}, got {:?}; imported without a colour",
+                row.id,
+                row.name,
+                row.color.as_deref().unwrap_or_default()
+            ));
+            None
+        });
         upsert!(
             conn,
             report,
@@ -387,7 +397,7 @@ fn import_tags(
                 id: row.id.clone(),
                 name: row.name.clone(),
                 description: row.description.clone(),
-                color: row.color.clone(),
+                color,
                 icon: row.icon.clone(),
                 // Set below once every tag exists.
                 parent_id: None,

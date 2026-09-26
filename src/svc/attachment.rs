@@ -1,8 +1,10 @@
-//! Attachment metadata and stored thumbnails.
+//! Attachment metadata, stored thumbnails, and the lifetime of originals.
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use diesel::prelude::*;
@@ -99,42 +101,127 @@ fn require(conn: &mut SqliteConnection, id: &str) -> Result<Attachment> {
     get(conn, id)?.ok_or_else(|| anyhow!("attachment not found"))
 }
 
-/// Deletes attachment `id`; its thumbnails go with it by foreign key. The
-/// original file is removed once the row is gone, when no other attachment
-/// shares its hash.
+/// Deletes attachment `id`; its thumbnails go with it by foreign key. When it
+/// was its entity's primary photo, the earliest remaining photo takes over,
+/// just as the first photo uploaded becomes primary. The original file is
+/// removed once the row is gone, when no other attachment shares its hash.
 pub fn delete(conn: &mut SqliteConnection, data_dir: &Path, id: &str) -> Result<()> {
-    if let Some(sha256) = conn.transaction(|conn| delete_row(conn, id))? {
-        remove_original(data_dir, &sha256);
+    let orphan = conn.transaction(|conn| {
+        let row = require(conn, id)?;
+        let orphan = delete_row(conn, &row)?;
+        if row.is_primary && row.kind == AttachmentKind::Photo {
+            promote_earliest_photo(conn, &row.entity_id)?;
+        }
+        Ok::<_, anyhow::Error>(orphan)
+    })?;
+    if let Some(sha256) = orphan {
+        remove_original(conn, data_dir, &sha256);
     }
     Ok(())
 }
 
-/// Deletes the row of attachment `id` and returns its hash when no other row
-/// shares it, meaning its original is now unreferenced. The caller removes
-/// that file with [`remove_original`] after its transaction commits.
-pub(crate) fn delete_row(conn: &mut SqliteConnection, id: &str) -> Result<Option<String>> {
-    let row = require(conn, id)?;
-    diesel::delete(attachments::table.find(id))
-        .execute(conn)
-        .with_context(|| format!("deleting attachment {id:?}"))?;
-    let sharing: i64 = attachments::table
-        .filter(attachments::sha256.eq(&row.sha256))
-        .count()
-        .get_result(conn)
-        .with_context(|| format!("counting attachments sharing {:?}", row.sha256))?;
-    Ok((sharing == 0).then_some(row.sha256))
+/// Flags the earliest photo of `entity_id` (by creation, then id) as primary.
+fn promote_earliest_photo(conn: &mut SqliteConnection, entity_id: &str) -> Result<()> {
+    let earliest: Option<String> = attachments::table
+        .filter(attachments::entity_id.eq(entity_id))
+        .filter(attachments::kind.eq(AttachmentKind::Photo))
+        .order((attachments::created_at.asc(), attachments::id.asc()))
+        .select(attachments::id)
+        .first(conn)
+        .optional()
+        .with_context(|| format!("finding the earliest photo of entity {entity_id:?}"))?;
+    if let Some(earliest) = earliest {
+        diesel::update(attachments::table.find(&earliest))
+            .set(attachments::is_primary.eq(true))
+            .execute(conn)
+            .with_context(|| format!("promoting photo {earliest:?} to primary"))?;
+    }
+    Ok(())
 }
 
-/// Removes the original with `sha256` from `data_dir`. The rows are already
+/// Deletes `row` and returns its hash when no other row shares it, meaning
+/// its original may now be unreferenced. The caller passes that hash to
+/// [`remove_original`] after its transaction commits.
+pub(crate) fn delete_row(conn: &mut SqliteConnection, row: &Attachment) -> Result<Option<String>> {
+    diesel::delete(attachments::table.find(&row.id))
+        .execute(conn)
+        .with_context(|| format!("deleting attachment {:?}", row.id))?;
+    let sharers = sharing(conn, &row.sha256)?;
+    Ok((sharers == 0).then(|| row.sha256.clone()))
+}
+
+/// How many attachments reference the original with `sha256`.
+fn sharing(conn: &mut SqliteConnection, sha256: &str) -> Result<i64> {
+    attachments::table
+        .filter(attachments::sha256.eq(sha256))
+        .count()
+        .get_result(conn)
+        .with_context(|| format!("counting attachments sharing {sha256:?}"))
+}
+
+/// Originals an upload is placing, by path, with how many uploads are placing
+/// each: identical bytes can arrive twice at once. Process-wide because the
+/// app is a single process and originals are shared by every request.
+static PLACING: LazyLock<Mutex<HashMap<PathBuf, usize>>> = LazyLock::new(Mutex::default);
+
+fn placing() -> MutexGuard<'static, HashMap<PathBuf, usize>> {
+    PLACING.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// An upload's claim on an original, from before it checks for or renames
+/// the file until after its row commits. While any claim is held,
+/// [`remove_original`] leaves that file alone, so a delete of the last other
+/// sharer cannot remove bytes the upload is about to reference.
+pub(crate) struct PlacingOriginal {
+    path: PathBuf,
+}
+
+impl PlacingOriginal {
+    /// Claims the original at `path` until the returned guard is dropped.
+    pub(crate) fn claim(path: PathBuf) -> Self {
+        *placing().entry(path.clone()).or_default() += 1;
+        Self { path }
+    }
+}
+
+impl Drop for PlacingOriginal {
+    fn drop(&mut self) {
+        let mut placing = placing();
+        if let Some(count) = placing.get_mut(&self.path) {
+            *count -= 1;
+            if *count == 0 {
+                placing.remove(&self.path);
+            }
+        }
+    }
+}
+
+/// Removes the original with `sha256` from `data_dir` unless an upload is
+/// placing it or an attachment references it. Both are checked under the
+/// placing lock, so an upload that committed its row after the caller's own
+/// sharer count still keeps its file. The caller's rows are already
 /// committed as deleted, so a failure only leaks disk space: it is logged
 /// rather than reported, and an already-missing file is fine.
-pub(crate) fn remove_original(data_dir: &Path, sha256: &str) {
+pub(crate) fn remove_original(conn: &mut SqliteConnection, data_dir: &Path, sha256: &str) {
     let path = original_path(data_dir, sha256);
+    let placing = placing();
+    if placing.contains_key(&path) {
+        return;
+    }
+    match sharing(conn, sha256) {
+        Ok(0) => {}
+        Ok(_) => return,
+        Err(err) => {
+            warn!(%sha256, "not removing an original: {err:#}");
+            return;
+        }
+    }
     if let Err(err) = fs::remove_file(&path)
         && err.kind() != ErrorKind::NotFound
     {
         warn!(path = %path.display(), %err, "could not remove an unreferenced original");
     }
+    drop(placing);
 }
 
 /// Makes photo `attachment_id` the primary photo of its entity, clearing the
@@ -166,7 +253,7 @@ mod tests {
     use crate::db::TestDb;
     use crate::kinds::AttachmentKind;
     use crate::schema::attachments;
-    use crate::svc::fixtures::{attachment, seed_sample};
+    use crate::svc::fixtures::{SampleIds, attachment, seed_sample};
 
     fn insert(conn: &mut SqliteConnection, row: Attachment) {
         diesel::insert_into(attachments::table)
@@ -326,5 +413,167 @@ mod tests {
         let err = set_primary(&mut conn, "missing").unwrap_err();
         assert_eq!(err.to_string(), "attachment not found");
         assert!(get(&mut conn, &ids.photo).unwrap().unwrap().is_primary);
+    }
+
+    /// Every attachment of `entity_id` as `(id, is_primary)`, in id order.
+    fn flags(conn: &mut SqliteConnection, entity_id: &str) -> Vec<(String, bool)> {
+        attachments::table
+            .filter(attachments::entity_id.eq(entity_id))
+            .order(attachments::id.asc())
+            .select((attachments::id, attachments::is_primary))
+            .load(conn)
+            .unwrap()
+    }
+
+    /// Two more drill photos besides the seeded primary one: `a-drill-early`
+    /// (created before) and `a-drill-late` (created after).
+    fn add_drill_photos(conn: &mut SqliteConnection, ids: &SampleIds) {
+        for (id, seq) in [("a-drill-late", 30), ("a-drill-early", 1)] {
+            insert(
+                conn,
+                attachment(
+                    id,
+                    &ids.drill,
+                    AttachmentKind::Photo,
+                    false,
+                    &"cc".repeat(32),
+                    7,
+                    seq,
+                ),
+            );
+        }
+    }
+
+    #[test]
+    fn deleting_the_primary_photo_promotes_the_earliest_remaining_photo() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        add_drill_photos(&mut conn, &ids);
+        let data = tempfile::tempdir().unwrap();
+
+        delete(&mut conn, data.path(), &ids.photo).unwrap();
+
+        assert_eq!(
+            flags(&mut conn, &ids.drill),
+            [
+                ("a-drill-early".to_owned(), true),
+                ("a-drill-late".to_owned(), false),
+                (ids.manual.clone(), false),
+            ]
+        );
+        assert_eq!(
+            primary_photo(&mut conn, &ids.drill).unwrap().unwrap().id,
+            "a-drill-early"
+        );
+    }
+
+    #[test]
+    fn deleting_a_non_primary_photo_changes_no_flags() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        add_drill_photos(&mut conn, &ids);
+        let data = tempfile::tempdir().unwrap();
+        let mut expected = flags(&mut conn, &ids.drill);
+        expected.retain(|(id, _)| id != "a-drill-early");
+
+        delete(&mut conn, data.path(), "a-drill-early").unwrap();
+
+        assert_eq!(flags(&mut conn, &ids.drill), expected);
+    }
+
+    #[test]
+    fn deleting_the_last_photo_leaves_no_primary() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let data = tempfile::tempdir().unwrap();
+
+        delete(&mut conn, data.path(), &ids.photo).unwrap();
+
+        // The manual is not a photo, so it must not inherit the flag.
+        assert_eq!(flags(&mut conn, &ids.drill), [(ids.manual.clone(), false)]);
+        assert!(primary_photo(&mut conn, &ids.drill).unwrap().is_none());
+    }
+
+    /// A data dir holding the seeded drill photo's original (`aa…`).
+    fn data_with_drill_photo() -> (tempfile::TempDir, PathBuf) {
+        let data = tempfile::tempdir().unwrap();
+        fs::create_dir(data.path().join("originals")).unwrap();
+        let file = original_path(data.path(), &"aa".repeat(32));
+        fs::write(&file, b"bytes").unwrap();
+        (data, file)
+    }
+
+    #[test]
+    fn an_original_being_placed_by_an_upload_survives_a_delete() {
+        // Carry-over (a): an upload of identical bytes racing the delete of
+        // their last other sharer must not lose the file.
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let (data, file) = data_with_drill_photo();
+
+        let claim = PlacingOriginal::claim(file.clone());
+        delete(&mut conn, data.path(), &ids.photo).unwrap();
+        assert!(file.exists(), "a file an upload is placing must stay");
+        drop(claim);
+
+        let other = original_path(data.path(), &"bb".repeat(32));
+        fs::write(&other, b"manual").unwrap();
+        delete(&mut conn, data.path(), &ids.manual).unwrap();
+        assert!(
+            !other.exists(),
+            "an unclaimed unreferenced original must go"
+        );
+    }
+
+    #[test]
+    fn overlapping_claims_on_one_original_all_have_to_end() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let (data, file) = data_with_drill_photo();
+        diesel::delete(attachments::table)
+            .execute(&mut conn)
+            .unwrap();
+        let sha = "aa".repeat(32);
+
+        let first = PlacingOriginal::claim(file.clone());
+        let second = PlacingOriginal::claim(file.clone());
+        drop(first);
+        remove_original(&mut conn, data.path(), &sha);
+        assert!(file.exists(), "one upload is still placing the file");
+        drop(second);
+        remove_original(&mut conn, data.path(), &sha);
+        assert!(!file.exists());
+    }
+
+    #[test]
+    fn remove_original_rechecks_sharers() {
+        // A row committed after the caller's own sharer count keeps the file.
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let (data, file) = data_with_drill_photo();
+        let row = get(&mut conn, &ids.photo).unwrap().unwrap();
+        let orphan = delete_row(&mut conn, &row).unwrap();
+        assert_eq!(orphan.as_deref(), Some(row.sha256.as_str()));
+        insert(
+            &mut conn,
+            attachment(
+                "a-late-sharer",
+                &ids.screws,
+                AttachmentKind::Photo,
+                true,
+                &row.sha256,
+                5,
+                40,
+            ),
+        );
+
+        remove_original(&mut conn, data.path(), &row.sha256);
+
+        assert!(file.exists());
     }
 }

@@ -100,8 +100,8 @@ fn validate_parent(conn: &mut SqliteConnection, id: Option<&str>, parent_id: &st
 
 /// A trimmed colour, which must be `#rgb`, `#rrggbb` or `#rrggbbaa` (any
 /// case); blank is no colour. The site paints it as an inline background, so
-/// nothing else may reach it.
-fn optional_color(color: Option<String>) -> Result<Option<String>> {
+/// nothing else may reach it, including through the importer.
+pub(crate) fn optional_color(color: Option<String>) -> Result<Option<String>> {
     let Some(color) = optional_text(color) else {
         return Ok(None);
     };

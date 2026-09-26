@@ -367,7 +367,7 @@ pub fn delete(conn: &mut SqliteConnection, data_dir: &Path, id: &str) -> Result<
         );
         let orphans = attachment::for_entity(conn, id)?
             .iter()
-            .filter_map(|a| attachment::delete_row(conn, &a.id).transpose())
+            .filter_map(|a| attachment::delete_row(conn, a).transpose())
             .collect::<Result<Vec<String>>>()?;
         diesel::delete(entities::table.find(id))
             .execute(conn)
@@ -375,7 +375,7 @@ pub fn delete(conn: &mut SqliteConnection, data_dir: &Path, id: &str) -> Result<
         Ok(orphans)
     })?;
     for sha256 in &orphans {
-        attachment::remove_original(data_dir, sha256);
+        attachment::remove_original(conn, data_dir, sha256);
     }
     Ok(())
 }

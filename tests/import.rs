@@ -220,6 +220,35 @@ fn tags_and_custom_fields_link() {
 }
 
 #[test]
+fn tag_colours_that_are_not_hex_import_as_none_with_a_warning() {
+    // Carry-over (d): the site paints a tag colour as an inline background,
+    // so imported colours go through the same hex rule as the API.
+    let h = Harness::new();
+    h.edit_table("tags", |rows| {
+        Harness::row(rows, &h.ids.iot)["color"] = "red".into();
+        Harness::row(rows, &h.ids.general)["color"] = " #ff8800 ".into();
+    });
+
+    let report = h.import().unwrap();
+
+    let mut conn = h.conn();
+    let iot = svc::tag::get(&mut conn, &h.ids.iot).unwrap().unwrap();
+    assert_eq!(iot.color, None);
+    let general = svc::tag::get(&mut conn, &h.ids.general).unwrap().unwrap();
+    assert_eq!(general.color.as_deref(), Some("#ff8800"));
+    let naming: Vec<&String> = report
+        .warnings
+        .iter()
+        .filter(|w| w.contains("colour"))
+        .collect();
+    assert_eq!(naming.len(), 1, "{:?}", report.warnings);
+    assert!(naming[0].contains(&h.ids.iot), "{}", naming[0]);
+    assert!(naming[0].contains("IOT"), "{}", naming[0]);
+    assert!(naming[0].contains("red"), "{}", naming[0]);
+    assert_eq!(counts(&report, "tags"), inserted(2));
+}
+
+#[test]
 fn templates_link_to_types_locations_and_fields() {
     let h = Harness::new();
     h.import().unwrap();

@@ -11,11 +11,11 @@
 //! cannot run script on the app origin.
 
 use std::fmt::Write as _;
-use std::io::ErrorKind;
+use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Context;
+use anyhow::{Context, anyhow};
 use axum::Router;
 use axum::body::Body;
 use axum::extract::{Extension, Path};
@@ -62,20 +62,22 @@ async fn original(
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
     let path = attachment::original_path(&data_dir, &att.sha256);
+    // Paths go to the log only: error messages reach clients.
+    let unreadable = |err: io::Error| {
+        tracing::error!(%id, path = %path.display(), %err, "could not read original");
+        anyhow!(err).context(format!("reading the original of attachment {id:?}"))
+    };
     let file = match File::open(&path).await {
+        Ok(file) => file,
         Err(err) if err.kind() == ErrorKind::NotFound => {
             tracing::warn!(%id, path = %path.display(), "original file missing");
             return Ok(StatusCode::NOT_FOUND.into_response());
         }
-        opened => opened.with_context(|| format!("opening {}", path.display()))?,
+        Err(err) => return Err(unreadable(err).into()),
     };
     // The file's own length, not `size_bytes`: a stale row must not make the
     // response lie about its body.
-    let len = file
-        .metadata()
-        .await
-        .with_context(|| format!("stat {}", path.display()))?
-        .len();
+    let len = file.metadata().await.map_err(unreadable)?.len();
     Ok((
         [
             (
@@ -111,7 +113,10 @@ async fn thumb(
                 HeaderValue::from_str(&thumb.mime_type).unwrap_or(OCTET_STREAM),
             ),
             (header::CACHE_CONTROL, IMMUTABLE_CACHE),
-            (header::ETAG, etag(&format!("{}-{size}", att.sha256))?),
+            (
+                header::ETAG,
+                etag(&format!("{}-{}", att.sha256, size.get()))?,
+            ),
             (header::X_CONTENT_TYPE_OPTIONS, NOSNIFF),
             (header::CONTENT_SECURITY_POLICY, SANDBOX),
         ],

@@ -3,8 +3,10 @@
 mod support;
 
 use std::fs;
+use std::io;
+use std::os::unix::fs as unix_fs;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::thread;
 
 use axum_test::{TestResponse, TestServer};
@@ -14,14 +16,14 @@ use home_tracker::kinds::AttachmentKind;
 use home_tracker::models::Thumbnail;
 use home_tracker::routes::app_with_thumbnails;
 use home_tracker::schema::{attachments, thumbnails};
-use home_tracker::svc::fixtures::{self, SampleIds, seed_sample};
+use home_tracker::svc::fixtures::{self, SampleIds, jpeg, png, seed_sample};
+use home_tracker::svc::thumbnail::{ThumbSize, allowed_size};
 use home_tracker::svc::thumbnail_service::ThumbnailService;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::task::JoinSet;
-
-use support::images;
+use tracing::subscriber::{self, DefaultGuard};
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
@@ -89,7 +91,7 @@ impl Fixture {
 
     /// A 1600×1200 JPEG photo titled `photo.jpg`.
     fn add_photo(&self, id: &str) -> String {
-        self.add_file(id, "photo.jpg", "image/jpeg", &images::jpeg(1600, 1200))
+        self.add_file(id, "photo.jpg", "image/jpeg", &jpeg(1600, 1200))
     }
 
     fn thumb_sizes(&self, id: &str) -> Vec<i32> {
@@ -114,7 +116,7 @@ fn dimensions(response: &TestResponse) -> (u32, u32) {
 #[tokio::test]
 async fn serves_the_original_with_headers() {
     let f = Fixture::new();
-    let bytes = images::jpeg(64, 48);
+    let bytes = jpeg(64, 48);
     let sha = f.add_file("att-1", "photo.jpg", "image/jpeg", &bytes);
 
     let response = f.server.get("/attachments/att-1?v=abc").await;
@@ -139,7 +141,7 @@ async fn strips_quotes_and_control_characters_from_the_filename() {
         "att-evil",
         "evil\".jpg\r\nX-Injected: 1",
         "image/jpeg",
-        &images::jpeg(8, 8),
+        &jpeg(8, 8),
     );
 
     let response = f.server.get("/attachments/att-evil").await;
@@ -155,12 +157,7 @@ async fn strips_quotes_and_control_characters_from_the_filename() {
 #[tokio::test]
 async fn non_ascii_filenames_get_an_rfc_6266_extended_parameter() {
     let f = Fixture::new();
-    f.add_file(
-        "att-utf8",
-        "Bohrmaschine ü.jpg",
-        "image/jpeg",
-        &images::jpeg(8, 8),
-    );
+    f.add_file("att-utf8", "Bohrmaschine ü.jpg", "image/jpeg", &jpeg(8, 8));
 
     let response = f.server.get("/attachments/att-utf8").await;
 
@@ -251,8 +248,8 @@ async fn thumb_is_404_for_non_images() {
 async fn thumb_is_case_insensitive_on_mime() {
     // Review focus 3: Homebox stores whatever MIME the uploader sent.
     let f = Fixture::new();
-    f.add_file("att-upper", "a.jpg", "image/JPEG", &images::jpeg(640, 480));
-    f.add_file("att-mixed", "b.png", " Image/Png ", &images::png(640, 480));
+    f.add_file("att-upper", "a.jpg", "image/JPEG", &jpeg(640, 480));
+    f.add_file("att-mixed", "b.png", " Image/Png ", &png(640, 480));
 
     for id in ["att-upper", "att-mixed"] {
         let response = f.server.get(&format!("/attachments/{id}/thumb/300")).await;
@@ -361,7 +358,7 @@ async fn graphql_urls_resolve_on_the_http_routes() {
     // The seam between the GraphQL URL formatting and the HTTP routes: the
     // strings the SPA is handed must be fetchable verbatim, `?v=` and all.
     let f = Fixture::new();
-    let bytes = images::jpeg(1600, 1200);
+    let bytes = jpeg(1600, 1200);
     f.add_file("att-real", "photo.jpg", "image/jpeg", &bytes);
     diesel::update(attachments::table.filter(attachments::entity_id.eq(&f.ids.drill)))
         .set(attachments::is_primary.eq(attachments::id.eq("att-real")))
@@ -440,4 +437,128 @@ async fn generation_is_bounded_by_the_semaphore() {
     let response = f.server.get("/attachments/att-1/thumb/300").await;
     response.assert_status_ok();
     assert_eq!(f.thumbs.generations(), 1);
+}
+
+/// Formatted log lines emitted on this thread while the capture's guard
+/// lives. `#[tokio::test]` runs every task on the test's thread, so the
+/// handlers' events land here.
+#[derive(Clone, Default)]
+struct Logs(Arc<Mutex<Vec<u8>>>);
+
+impl Logs {
+    fn capture() -> (Self, DefaultGuard) {
+        let logs = Self::default();
+        let writer = logs.clone();
+        let collector = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_writer(move || writer.clone())
+            .finish();
+        (logs, subscriber::set_default(collector))
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
+impl io::Write for Logs {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn undecodable_original_is_404_once_then_cached() {
+    let f = Fixture::new();
+    let (logs, _guard) = Logs::capture();
+    // JPEG magic, so it is thumbnailable by type, but no decodable image.
+    f.add_file(
+        "att-bad",
+        "photo.jpg",
+        "image/jpeg",
+        b"\xFF\xD8\xFF\xE0 not really a jpeg",
+    );
+
+    for size in [300, 300, 500] {
+        f.server
+            .get(&format!("/attachments/att-bad/thumb/{size}"))
+            .expect_failure()
+            .await
+            .assert_status_not_found();
+    }
+
+    assert_eq!(f.thumbs.generations(), 0);
+    assert!(f.thumb_sizes("att-bad").is_empty());
+    let text = logs.text();
+    assert_eq!(
+        text.matches("could not be decoded").count(),
+        1,
+        "decoded more than once: {text}"
+    );
+    assert!(text.contains("att-bad"), "{text}");
+}
+
+#[tokio::test]
+async fn missing_original_logs_a_warning() {
+    let f = Fixture::new();
+    let sha = f.add_photo("att-gone");
+    fs::remove_file(f.original_path(&sha)).unwrap();
+    let (logs, _guard) = Logs::capture();
+
+    f.server
+        .get("/attachments/att-gone/thumb/300")
+        .expect_failure()
+        .await
+        .assert_status_not_found();
+
+    let text = logs.text();
+    let line = text
+        .lines()
+        .find(|l| l.contains("original file missing"))
+        .unwrap_or_else(|| panic!("no warning in {text:?}"));
+    assert!(line.contains("WARN"), "{line}");
+    assert!(line.contains("att-gone"), "{line}");
+}
+
+#[tokio::test]
+async fn thumb_size_newtype_is_used_end_to_end() {
+    let size: ThumbSize = allowed_size(301).unwrap();
+    assert_eq!(size.get(), 500);
+    let f = Fixture::new();
+    f.add_photo("att-1");
+
+    let (_, thumb) = f
+        .thumbs
+        .get_or_generate("att-1", size)
+        .await
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(thumb.size, 500);
+    assert_eq!((thumb.width, thumb.height), (500, 375));
+}
+
+#[tokio::test]
+async fn read_failures_are_500_without_filesystem_paths() {
+    // An original that exists but cannot be read: a symlink to itself.
+    let f = Fixture::new();
+    let sha = f.add_photo("att-loop");
+    let path = f.original_path(&sha);
+    fs::remove_file(&path).unwrap();
+    unix_fs::symlink(&path, &path).unwrap();
+    let data_dir = f.data.path().to_str().unwrap().to_owned();
+
+    for url in ["/attachments/att-loop", "/attachments/att-loop/thumb/300"] {
+        let response = f.server.get(url).expect_failure().await;
+        response.assert_status_internal_server_error();
+        let body = response.text();
+        assert!(body.contains("att-loop"), "{url}: {body}");
+        assert!(!body.contains(&data_dir), "{url} leaks a path: {body}");
+        assert!(!body.contains(&sha), "{url} leaks the file name: {body}");
+    }
 }
