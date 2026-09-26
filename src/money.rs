@@ -5,12 +5,27 @@ use diesel::expression::AsExpression;
 use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types::BigInt;
 use diesel::sqlite::{Sqlite, SqliteValue};
+use serde::{Deserialize, Serialize};
 use tracing::warn;
 
 #[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, AsExpression, FromSqlRow,
+    Debug,
+    Clone,
+    Copy,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    Hash,
+    Default,
+    AsExpression,
+    FromSqlRow,
+    Serialize,
+    Deserialize,
 )]
 #[diesel(sql_type = BigInt)]
+// JSON carries the bare integer, as GraphQL's `*_cents: Int` does.
+#[serde(transparent)]
 pub struct Cents(pub i64);
 
 impl Cents {

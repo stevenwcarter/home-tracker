@@ -13,6 +13,7 @@ lto = true
 anyhow = "1"
 async-trait = "0.1"
 axum = { version = "0.8", features = ["http2", "macros", "multipart"] }
+base64 = "0.22"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 clap = { version = "4", features = ["derive"] }
 diesel = { version = "2.3", features = ["sqlite", "r2d2", "chrono", "returning_clauses_for_sqlite_3_35"] }

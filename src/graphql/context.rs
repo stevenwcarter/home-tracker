@@ -10,6 +10,9 @@ use juniper::{FieldError, FieldResult};
 
 use crate::ai::AiState;
 use crate::db::SqlitePool;
+use crate::ingest::events::IngestEvents;
+use crate::ingest::runner::IngestRunner;
+use crate::svc::thumbnail_service::ThumbnailService;
 
 /// What a user may do. v1 has no users; the enum exists so mutations gate on it now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,25 +49,42 @@ pub struct GraphQLContext {
     pub data_dir: Arc<Path>,
     /// The AI environment overrides and model client, shared process-wide.
     pub ai: Arc<AiState>,
+    /// The ingest runner submits and retries hand their work to.
+    pub ingest: Arc<IngestRunner>,
 }
 
 impl juniper::Context for GraphQLContext {}
 
 impl GraphQLContext {
-    /// A context with AI disabled ([`AiState::disabled`]); the router
-    /// supplies the real state through [`Self::with_ai`].
+    /// A context with AI disabled ([`AiState::disabled`]) and a runner of
+    /// its own over that disabled state; the router supplies the real ones
+    /// through [`Self::with_ai`] and [`Self::with_ingest`].
     pub fn new(pool: SqlitePool, actor: Actor, data_dir: impl Into<Arc<Path>>) -> Self {
+        let data_dir: Arc<Path> = data_dir.into();
+        let ai = Arc::new(AiState::disabled());
+        let ingest = IngestRunner::new(
+            pool.clone(),
+            ThumbnailService::new(pool.clone(), data_dir.to_path_buf()),
+            Arc::clone(&ai),
+            IngestEvents::new(),
+        );
         Self {
             pool,
             actor,
-            data_dir: data_dir.into(),
-            ai: Arc::new(AiState::disabled()),
+            data_dir,
+            ai,
+            ingest,
         }
     }
 
     /// This context with `ai` as its AI state.
     pub fn with_ai(self, ai: Arc<AiState>) -> Self {
         Self { ai, ..self }
+    }
+
+    /// This context with `ingest` as its runner.
+    pub fn with_ingest(self, ingest: Arc<IngestRunner>) -> Self {
+        Self { ingest, ..self }
     }
 
     /// One pooled connection for the duration of a resolver.

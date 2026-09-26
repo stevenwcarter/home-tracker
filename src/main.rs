@@ -80,7 +80,21 @@ async fn serve(config: Config) -> Result<()> {
         .context("registering the listener with tokio")?;
     tracing::info!(%addr, dual_stack = addr.is_ipv6(), "listening");
 
-    axum::serve(listener, routes::app(pool, config.data_dir))
+    let (app, runner) = routes::app_with_runner(pool, config.data_dir);
+    // Cleanup first, so an abandoned batch is not resumed only to be
+    // deleted under its run. A failure only postpones it: the schedule
+    // tries again.
+    if let Err(err) = runner.cleanup_stale().await {
+        tracing::warn!("ingest cleanup failed: {err:#}");
+    }
+    runner.spawn_cleanup_schedule();
+    let resumed = runner
+        .resume_interrupted()
+        .await
+        .context("resuming interrupted ingest batches")?;
+    tracing::info!(resumed, "resumed interrupted ingest batches");
+
+    axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")

@@ -98,6 +98,9 @@ impl ThumbSize {
     /// The smallest size, generated with every upload.
     pub const SMALLEST: Self = THUMB_SIZES[0];
 
+    /// The largest size, the rendition sent to the vision model.
+    pub const LARGEST: Self = THUMB_SIZES[THUMB_SIZES.len() - 1];
+
     /// The box edge in pixels.
     pub fn get(self) -> u32 {
         self.0
@@ -127,7 +130,7 @@ pub fn allowed_size(requested: i64) -> Option<ThumbSize> {
         THUMB_SIZES
             .into_iter()
             .find(|s| s.0 >= wanted)
-            .unwrap_or(THUMB_SIZES[THUMB_SIZES.len() - 1]),
+            .unwrap_or(ThumbSize::LARGEST),
     )
 }
 

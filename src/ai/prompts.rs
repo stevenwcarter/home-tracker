@@ -6,7 +6,11 @@
 //! strict-mode compatible: every property is listed in `required`, "not
 //! found" is `null`, and no other properties are allowed.
 
+use std::fmt::Write as _;
+
 use serde_json::{Map, Value, json};
+
+use crate::ingest::parse::PhotoDescription;
 
 /// The system prompt for describing one photo.
 pub const VISION_SYSTEM: &str = "\
@@ -136,9 +140,63 @@ pub fn with_extra_instructions(base: &str, extra: Option<&str>) -> String {
     }
 }
 
+/// The item record's fields and their types, as the synthesis message lists
+/// them; the same fields as [`item_suggestion_schema`] (a test pins that).
+const SUGGESTION_FIELDS: [(&str, &str); 16] = [
+    ("name", "text"),
+    ("description", "text"),
+    ("manufacturer", "text"),
+    ("model_number", "text"),
+    ("serial_number", "text"),
+    ("quantity", "number, at least 0"),
+    ("purchase_date", "date, YYYY-MM-DD"),
+    ("purchase_from", "text"),
+    (
+        "purchase_price_cents",
+        "integer cents of the instance currency",
+    ),
+    ("warranty_expires", "date, YYYY-MM-DD"),
+    ("lifetime_warranty", "true or false"),
+    ("warranty_details", "text"),
+    ("notes", "text"),
+    ("tag_names", "list of names from the existing tags"),
+    ("confidence", "low, medium or high"),
+    ("reasoning", "text"),
+];
+
+/// The user message beside photo `position` (1-based) of an item's `total`.
+pub fn describe_user_message(position: usize, total: usize) -> String {
+    format!("Photo {position} of {total} of one item.")
+}
+
+/// The synthesis step's user message: each described photo (by its 1-based
+/// position among the item's photos) as JSON, the instance currency, the
+/// existing tag names and the fields to fill.
+pub fn synthesis_user_message(
+    descriptions: &[(usize, &PhotoDescription)],
+    currency: &str,
+    tag_names: &[String],
+) -> String {
+    let mut message = String::from("Descriptions of the item's photos:\n");
+    for (position, description) in descriptions {
+        // Writing to a String cannot fail.
+        let _ = writeln!(message, "Photo {position}: {}", description.to_json());
+    }
+    let _ = write!(
+        message,
+        "\nInstance currency: {currency}\nExisting tags: {}\n\nFields (null when not found):\n",
+        Value::from(tag_names)
+    );
+    for (name, kind) in SUGGESTION_FIELDS {
+        let _ = writeln!(message, "- {name}: {kind}");
+    }
+    message
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kinds::SuggestedKind;
 
     /// The property names of object schema `schema`, sorted.
     fn properties(schema: &Value) -> Vec<&str> {
@@ -239,6 +297,53 @@ mod tests {
                     .as_array()
                     .is_some_and(|types| types.contains(&json!("null"))),
                 "{name} is not nullable"
+            );
+        }
+    }
+
+    #[test]
+    fn the_synthesis_field_list_matches_the_schema() {
+        let listed: Vec<&str> = SUGGESTION_FIELDS.iter().map(|(name, _)| *name).collect();
+        assert_strict_object(&item_suggestion_schema(), &listed);
+    }
+
+    #[test]
+    fn the_describe_message_places_the_photo() {
+        assert_eq!(describe_user_message(2, 3), "Photo 2 of 3 of one item.");
+    }
+
+    #[test]
+    fn the_synthesis_message_holds_every_summary_the_currency_and_every_tag() {
+        let receipt = PhotoDescription {
+            kind: SuggestedKind::Receipt,
+            summary: "Amazon receipt for a mouse".to_owned(),
+            text: Some("Total 99.99".to_owned()),
+            details: json!({ "price": "99.99" }),
+        };
+        let label = PhotoDescription {
+            kind: SuggestedKind::Photo,
+            summary: "Underside label of a mouse".to_owned(),
+            text: None,
+            details: json!({}),
+        };
+        let tags = ["Electronics".to_owned(), "Home \"office\"".to_owned()];
+        let message = synthesis_user_message(&[(1, &receipt), (3, &label)], "EUR", &tags);
+        for needle in [
+            "Photo 1: ",
+            "Amazon receipt for a mouse",
+            "Total 99.99",
+            "\"receipt\"",
+            "Photo 3: ",
+            "Underside label of a mouse",
+            "Instance currency: EUR",
+            "Electronics",
+            r#"Home \"office\""#,
+            "- purchase_price_cents: integer cents of the instance currency",
+            "- reasoning: text",
+        ] {
+            assert!(
+                message.contains(needle),
+                "{needle:?} missing from {message}"
             );
         }
     }

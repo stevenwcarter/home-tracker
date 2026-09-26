@@ -26,6 +26,8 @@ use crate::api::upload::upload_routes;
 use crate::db::SqlitePool;
 use crate::graphql::context::Actor;
 use crate::graphql::schema::create_schema;
+use crate::ingest::events::IngestEvents;
+use crate::ingest::runner::IngestRunner;
 use crate::svc::thumbnail_service::ThumbnailService;
 
 /// The Vite build output. `site/build` must exist at compile time (see `just site-placeholder`).
@@ -68,6 +70,12 @@ async fn immutable_cache(request: Request, next: Next) -> Response {
 /// The whole application; originals and thumbnails are read from `data_dir`,
 /// and the AI environment overrides are read here, once.
 pub fn app(pool: SqlitePool, data_dir: PathBuf) -> Router {
+    app_with_runner(pool, data_dir).0
+}
+
+/// [`app`] and the ingest runner its routes share, so startup can resume
+/// interrupted batches and schedule cleanup on that same runner.
+pub fn app_with_runner(pool: SqlitePool, data_dir: PathBuf) -> (Router, Arc<IngestRunner>) {
     let env = AiEnv::from_env();
     tracing::info!(overrides = ?env.overridden(), "AI environment");
     let ai = Arc::new(AiState {
@@ -75,13 +83,14 @@ pub fn app(pool: SqlitePool, data_dir: PathBuf) -> Router {
         client: Arc::new(OpenAiClient::new()),
     });
     let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
-    with_actor_seam(routes(pool, thumbnails, ai))
+    let (router, runner) = routes(pool, thumbnails, ai);
+    (with_actor_seam(router), runner)
 }
 
 /// [`app`] around a caller-supplied thumbnail service, so tests can observe
 /// it. AI is disabled.
 pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
-    with_actor_seam(routes(pool, thumbnails, Arc::new(AiState::disabled())))
+    with_actor_seam(routes(pool, thumbnails, Arc::new(AiState::disabled())).0)
 }
 
 /// Test support: [`app`] with a caller-supplied AI state, so tests set the
@@ -89,7 +98,7 @@ pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) 
 /// environment.
 pub fn app_with_ai(pool: SqlitePool, data_dir: PathBuf, ai: Arc<AiState>) -> Router {
     let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
-    with_actor_seam(routes(pool, thumbnails, ai))
+    with_actor_seam(routes(pool, thumbnails, ai).0)
 }
 
 /// Test support: [`app`] with every request made by `actor` instead of the
@@ -97,7 +106,9 @@ pub fn app_with_ai(pool: SqlitePool, data_dir: PathBuf, ai: Arc<AiState>) -> Rou
 /// do. AI is disabled. Production uses [`app`].
 pub fn app_with_actor(pool: SqlitePool, data_dir: PathBuf, actor: Actor) -> Router {
     let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
-    routes(pool, thumbnails, Arc::new(AiState::disabled())).layer(Extension(actor))
+    routes(pool, thumbnails, Arc::new(AiState::disabled()))
+        .0
+        .layer(Extension(actor))
 }
 
 /// `router` with [`attach_actor`] outermost, so every route (and the
@@ -106,8 +117,19 @@ fn with_actor_seam(router: Router) -> Router {
     router.layer(middleware::from_fn(attach_actor))
 }
 
-/// Every route, without the actor layer.
-fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>, ai: Arc<AiState>) -> Router {
+/// Every route, without the actor layer, and the one ingest runner they
+/// share, built over the same thumbnail service and AI state.
+fn routes(
+    pool: SqlitePool,
+    thumbnails: Arc<ThumbnailService>,
+    ai: Arc<AiState>,
+) -> (Router, Arc<IngestRunner>) {
+    let runner = IngestRunner::new(
+        pool.clone(),
+        Arc::clone(&thumbnails),
+        Arc::clone(&ai),
+        IngestEvents::new(),
+    );
     let schema = Arc::new(create_schema());
     // The thumbnail service's data dir is the one the attachment routes read,
     // so a GraphQL delete removes originals from the same place.
@@ -119,7 +141,13 @@ fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>, ai: Arc<AiState>)
         // (and a missing-asset 404) would be cached immutably too. Pinned by
         // tests/spa_routes.rs.
         .layer(middleware::from_fn(immutable_cache))
-        .merge(graphql_routes(pool.clone(), schema, data_dir, ai))
+        .merge(graphql_routes(
+            pool.clone(),
+            schema,
+            data_dir,
+            ai,
+            Arc::clone(&runner),
+        ))
         .route("/", get(index_handler))
         .fallback(get(index_handler))
         .layer(CompressionLayer::new());
@@ -128,7 +156,7 @@ fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>, ai: Arc<AiState>)
     // Pinned by tests/attachments.rs. Uploads answer small JSON bodies. The
     // ingest routes are both: a staging upload and staged originals.
     let upload_dir = Arc::new(thumbnails.data_dir().to_path_buf());
-    Router::new()
+    let router = Router::new()
         .merge(upload_routes(pool.clone(), Arc::clone(&upload_dir)))
         .merge(ingest_routes(
             pool.clone(),
@@ -136,5 +164,6 @@ fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>, ai: Arc<AiState>)
             Arc::clone(&thumbnails),
         ))
         .merge(attachment_routes(pool, thumbnails))
-        .merge(compressed)
+        .merge(compressed);
+    (router, runner)
 }
