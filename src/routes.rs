@@ -1,6 +1,6 @@
 //! Top-level router: GraphQL, attachments, uploads, ingest photos, static
 //! assets, SPA fallback, compression (everything but attachments, uploads and
-//! ingest photos), and the actor seam around all of it.
+//! the ingest routes), and the actor seam around all of it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -154,7 +154,9 @@ fn routes(
     // Merged outside the compression layer: originals are served byte-for-byte
     // under their sha256 ETag, and photos gain nothing from re-encoding.
     // Pinned by tests/attachments.rs. Uploads answer small JSON bodies. The
-    // ingest routes are both: a staging upload and staged originals.
+    // ingest routes are both, a staging upload and staged originals, plus
+    // the progress stream, which a compressor would buffer (pinned by
+    // tests/ingest_events.rs).
     let upload_dir = Arc::new(thumbnails.data_dir().to_path_buf());
     let router = Router::new()
         .merge(upload_routes(pool.clone(), Arc::clone(&upload_dir)))
@@ -162,6 +164,7 @@ fn routes(
             pool.clone(),
             upload_dir,
             Arc::clone(&thumbnails),
+            Arc::clone(runner.events()),
         ))
         .merge(attachment_routes(pool, thumbnails))
         .merge(compressed);

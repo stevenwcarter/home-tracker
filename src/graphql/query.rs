@@ -2,7 +2,7 @@ use juniper::{FieldResult, ID};
 
 use super::context::GraphQLContext;
 use super::schema::graphql_translate_anyhow as gql;
-use crate::models::{Entity, EntityType, Tag};
+use crate::models::{Entity, EntityType, IngestBatch, Tag};
 use crate::svc;
 use crate::svc::ai_settings::AiSettingsView;
 use crate::svc::stats::Summary;
@@ -56,6 +56,24 @@ impl Query {
         gql(context
             .conn()
             .and_then(|mut c| svc::ai_settings::view(&mut c, &context.ai.env)))
+    }
+
+    /// Ingest batch `id`, or null when it does not exist (or was deleted).
+    fn ingest_batch(context: &GraphQLContext, id: ID) -> FieldResult<Option<IngestBatch>> {
+        gql(context
+            .conn()
+            .and_then(|mut c| svc::ingest::get_batch(&mut c, &id)))
+    }
+
+    /// The unfinished batches started from `parentId` (omitted: from no
+    /// entity), newest first: what a page offers to resume.
+    fn open_ingest_batches(
+        context: &GraphQLContext,
+        parent_id: Option<ID>,
+    ) -> FieldResult<Vec<IngestBatch>> {
+        gql(context
+            .conn()
+            .and_then(|mut c| svc::ingest::open_batches(&mut c, parent_id.as_deref())))
     }
 
     /// Every tag.

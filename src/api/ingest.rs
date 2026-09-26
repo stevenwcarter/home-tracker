@@ -8,27 +8,38 @@
 //! - `GET /ingest/photos/{id}` and `GET /ingest/photos/{id}/thumb/{size}`
 //!   serve a staged photo exactly as the attachment routes serve an
 //!   attachment, through [`crate::api::blob`].
+//! - `GET /api/ingest/batches/{id}/events` streams the batch's progress as
+//!   server-sent events named `photo`, `item` and `batch`, each with data
+//!   `{"id": …}` naming the row that changed, and a `ping` comment every
+//!   15 s. It ends once the batch is done or deleted.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use axum::extract::multipart::MultipartRejection;
 use axum::extract::{Multipart, Path, State};
 use axum::http::StatusCode;
+use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
 use serde::Serialize;
+use serde_json::json;
 use tokio::task;
-use tracing::info;
+use tokio_stream::wrappers::BroadcastStream;
+use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
+use tokio_stream::{self as stream, StreamExt};
+use tracing::{info, warn};
 
 use crate::api::AppError;
 use crate::api::blob::{self, BlobOwner};
 use crate::api::upload::{self, UploadFailure};
 use crate::db::SqlitePool;
 use crate::graphql::context::Actor;
-use crate::kinds::IngestPhotoStatus;
+use crate::ingest::events::{EventKind, IngestEvent, IngestEvents};
+use crate::kinds::{IngestBatchStatus, IngestPhotoStatus};
 use crate::models::IngestPhoto;
 use crate::svc::attachment::{self, DEFAULT_THUMB_URL_SIZE};
 use crate::svc::blob::Blob;
@@ -36,21 +47,28 @@ use crate::svc::ingest;
 use crate::svc::thumbnail_service::ThumbnailService;
 use crate::svc::upload::store_ingest_photo;
 
+/// How often an idle progress stream sends its `ping` comment, so proxies
+/// and the browser keep the connection open.
+const KEEP_ALIVE_EVERY: Duration = Duration::from_secs(15);
+
 #[derive(Clone)]
 struct IngestState {
     pool: SqlitePool,
     data_dir: Arc<PathBuf>,
     thumbnails: Arc<ThumbnailService>,
+    events: Arc<IngestEvents>,
 }
 
-/// The ingest routes: staging uploads into `data_dir`, and the staged
-/// photos served from it and thumbnailed by `thumbnails`.
+/// The ingest routes: staging uploads into `data_dir`, the staged photos
+/// served from it and thumbnailed by `thumbnails`, and the progress streams
+/// fed by `events`.
 ///
 /// Only the upload writes, so only it reads `Extension<Actor>`.
 pub fn ingest_routes(
     pool: SqlitePool,
     data_dir: Arc<PathBuf>,
     thumbnails: Arc<ThumbnailService>,
+    events: Arc<IngestEvents>,
 ) -> Router {
     // The upload limits wrap the staging route alone, added before them.
     upload::with_upload_limits(
@@ -58,10 +76,12 @@ pub fn ingest_routes(
     )
     .route("/ingest/photos/{id}", get(original))
     .route("/ingest/photos/{id}/thumb/{size}", get(thumb))
+    .route("/api/ingest/batches/{id}/events", get(progress))
     .with_state(IngestState {
         pool,
         data_dir,
         thumbnails,
+        events,
     })
 }
 
@@ -164,6 +184,55 @@ async fn thumb(
         &id,
     )
     .await
+}
+
+/// Batch `id`'s progress stream. It subscribes before loading the batch, so
+/// no change between the load and the subscription is missed; a client
+/// refetches the batch when the stream opens, so the stream carries only
+/// what changes after that. A batch that is already done gets one `batch`
+/// event and the stream ends.
+async fn progress(
+    Path(id): Path<String>,
+    State(IngestState { pool, events, .. }): State<IngestState>,
+) -> Result<Response, AppError> {
+    let receiver = events.subscribe(&id);
+    let batch = {
+        let mut conn = pool.get().context("db connection")?;
+        ingest::get_batch(&mut conn, &id)?
+    };
+    let Some(batch) = batch else {
+        // Nobody else can be watching a batch that does not exist; closing
+        // drops the channel this request opened.
+        events.close(&id);
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    let done = batch.status == IngestBatchStatus::Done;
+    if done {
+        // The receiver sees the channel closed once it has read what was
+        // already sent, which ends the live part of the stream.
+        events.close(&id);
+    }
+    let snapshot = done.then(|| IngestEvent::new(EventKind::Batch, id.as_str()));
+    let live = BroadcastStream::new(receiver).map(move |received| match received {
+        Ok(event) => event,
+        // The client refetches the whole batch on any event, so one
+        // `batch` event stands in for everything it missed.
+        Err(BroadcastStreamRecvError::Lagged(missed)) => {
+            warn!(batch = %id, missed, "ingest progress stream lagged");
+            IngestEvent::new(EventKind::Batch, id.as_str())
+        }
+    });
+    let stream = stream::iter(snapshot).chain(live).map(sse_event);
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::new().interval(KEEP_ALIVE_EVERY).text("ping"))
+        .into_response())
+}
+
+/// `event` as a server-sent event named after its kind, data `{"id": …}`.
+fn sse_event(event: IngestEvent) -> Result<Event, axum::Error> {
+    Event::default()
+        .event(event.kind.as_str())
+        .json_data(json!({ "id": event.id }))
 }
 
 /// Staged photo `id`, if it exists.

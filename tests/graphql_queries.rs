@@ -314,8 +314,16 @@ async fn argument_types_and_defaults_match_the_spec() {
             entityInput: __type(name: "EntityInput") { inputFields { name type { ...Ref } } }
             entityTypeInput: __type(name: "EntityTypeInput") { inputFields { name type { ...Ref } } }
             tagInput: __type(name: "TagInput") { inputFields { name type { ...Ref } } }
+            ingestPhotoKindInput: __type(name: "IngestPhotoKindInput") { inputFields { name type { ...Ref } } }
+            ingestSuggestion: __type(name: "IngestSuggestion") { fields { name type { ...Ref } } }
+            ingestBatchStatus: __type(name: "IngestBatchStatus") { enumValues { name } }
+            ingestItemStatus: __type(name: "IngestItemStatus") { enumValues { name } }
+            ingestPhotoStatus: __type(name: "IngestPhotoStatus") { enumValues { name } }
+            suggestedKind: __type(name: "SuggestedKind") { enumValues { name } }
         }
-        fragment Ref on __Type { kind name ofType { kind name ofType { kind name } } }"#,
+        fragment Ref on __Type {
+            kind name ofType { kind name ofType { kind name ofType { kind name } } }
+        }"#,
         json!({}),
     )
     .await;
@@ -404,8 +412,29 @@ async fn argument_types_and_defaults_match_the_spec() {
             // AI ingest spec §6.
             "updateAiSettings(input: AiSettingsInput!): AiSettings!",
             "testAiConnection(): AiTestResult!",
+            "createIngestBatch(parentId: ID): IngestBatch!",
+            "addIngestItem(batchId: ID!): IngestItem!",
+            "removeIngestItem(id: ID!): Boolean!",
+            "removeIngestPhoto(id: ID!): Boolean!",
+            "submitIngestBatch(id: ID!): IngestBatch!",
+            "retryIngestItem(id: ID!): IngestItem!",
+            "acceptIngestItem(id: ID!, input: EntityInput!, photoKinds: [IngestPhotoKindInput!]!): Entity!",
+            "skipIngestItem(id: ID!): IngestItem!",
+            "deleteIngestBatch(id: ID!): Boolean!",
         ]
     );
+
+    // Spec §6 ingest queries.
+    assert_eq!(
+        arg("query", "ingestBatch", "id")["type"]["kind"],
+        "NON_NULL"
+    );
+    let parent = arg("query", "openIngestBatches", "parentId");
+    assert_eq!(
+        parent["type"]["kind"], "SCALAR",
+        "parentId is nullable: {parent}"
+    );
+    assert_eq!(parent["type"]["name"], "ID");
 
     // Spec §6 input objects: field names and types, in declaration order.
     let input_fields = |ty: &str| -> Vec<String> {
@@ -461,6 +490,73 @@ async fn argument_types_and_defaults_match_the_spec() {
             "icon: String",
             "parentId: ID",
         ]
+    );
+    assert_eq!(
+        input_fields("ingestPhotoKindInput"),
+        ["photoId: ID!", "kind: AttachmentKind!"]
+    );
+
+    // Spec §6 `type IngestSuggestion`: every field nullable but the tag names.
+    let suggestion_fields: Vec<String> = data["ingestSuggestion"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| format!("{}: {}", f["name"].as_str().unwrap(), type_ref(&f["type"])))
+        .collect();
+    assert_eq!(
+        suggestion_fields,
+        [
+            "name: String",
+            "description: String",
+            "manufacturer: String",
+            "modelNumber: String",
+            "serialNumber: String",
+            "quantity: Float",
+            "purchaseDate: LocalDate",
+            "purchaseFrom: String",
+            "purchasePriceCents: Int",
+            "warrantyExpires: LocalDate",
+            "lifetimeWarranty: Boolean",
+            "warrantyDetails: String",
+            "notes: String",
+            "tagNames: [String!]!",
+            "confidence: String",
+            "reasoning: String",
+        ]
+    );
+
+    // Spec §6 ingest enums, spelled as GraphQL spells them.
+    let values = |ty: &str| -> Vec<String> {
+        data[ty]["enumValues"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v["name"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        values("ingestBatchStatus"),
+        ["COLLECTING", "PROCESSING", "REVIEWING", "DONE"]
+    );
+    assert_eq!(
+        values("ingestItemStatus"),
+        [
+            "COLLECTING",
+            "QUEUED",
+            "ANALYSING",
+            "READY",
+            "FAILED",
+            "ACCEPTED",
+            "SKIPPED"
+        ]
+    );
+    assert_eq!(
+        values("ingestPhotoStatus"),
+        ["PENDING", "DESCRIBED", "FAILED"]
+    );
+    assert_eq!(
+        values("suggestedKind"),
+        ["PHOTO", "RECEIPT", "WARRANTY", "MANUAL", "OTHER"]
     );
 }
 

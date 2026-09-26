@@ -1,15 +1,20 @@
 //! The GraphQL `Mutation` root. Every resolver passes the write gate first,
 //! so a read-only actor is refused before any input is parsed or validated.
 
-use juniper::{FieldResult, ID};
+use juniper::{FieldError, FieldResult, ID, Value};
+use tracing::info;
 
 use super::context::GraphQLContext;
-use super::inputs::{AiSettingsInput, EntityInput, EntityTypeInput, TagInput};
+use super::inputs::{
+    AiSettingsInput, EntityInput, EntityTypeInput, IngestPhotoKindInput, TagInput,
+};
 use super::schema::graphql_translate_anyhow as gql;
 use crate::ai::client::AiError;
-use crate::models::{Entity, EntityType, Tag};
+use crate::kinds::{AttachmentKind, IngestBatchStatus};
+use crate::models::{Entity, EntityType, IngestBatch, IngestItem, Tag};
 use crate::svc;
 use crate::svc::ai_settings::{AiSettingsView, AiTestResult};
+use crate::svc::ingest::IngestError;
 
 pub struct Mutation;
 
@@ -138,6 +143,137 @@ impl Mutation {
                 latency_ms: 0,
             },
         })
+    }
+
+    /// Starts a batch under `parentId` (omitted: under no entity) with one
+    /// empty item.
+    fn create_ingest_batch(
+        ctx: &GraphQLContext,
+        parent_id: Option<ID>,
+    ) -> FieldResult<IngestBatch> {
+        ctx.require_write()?;
+        refusable(
+            ctx.conn()
+                .and_then(|mut c| svc::ingest::create_batch(&mut c, parent_id.as_deref())),
+        )
+    }
+
+    /// Appends an empty item to collecting batch `batchId`.
+    fn add_ingest_item(ctx: &GraphQLContext, batch_id: ID) -> FieldResult<IngestItem> {
+        ctx.require_write()?;
+        refusable(
+            ctx.conn()
+                .and_then(|mut c| svc::ingest::add_item(&mut c, &batch_id)),
+        )
+    }
+
+    /// Removes item `id` and its photos while its batch is collecting.
+    fn remove_ingest_item(ctx: &GraphQLContext, id: ID) -> FieldResult<bool> {
+        ctx.require_write()?;
+        refusable(
+            ctx.conn()
+                .and_then(|mut c| svc::ingest::remove_item(&mut c, &ctx.data_dir, &id))
+                .map(|()| true),
+        )
+    }
+
+    /// Removes staged photo `id` while its batch is collecting.
+    fn remove_ingest_photo(ctx: &GraphQLContext, id: ID) -> FieldResult<bool> {
+        ctx.require_write()?;
+        refusable(
+            ctx.conn()
+                .and_then(|mut c| svc::ingest::remove_photo(&mut c, &ctx.data_dir, &id))
+                .map(|()| true),
+        )
+    }
+
+    /// Queues batch `id`'s items with photos (dropping the empty ones) and
+    /// starts analysing them in the background; refused without any photo.
+    fn submit_ingest_batch(ctx: &GraphQLContext, id: ID) -> FieldResult<IngestBatch> {
+        ctx.require_write()?;
+        // The connection is released at the end of this statement, after the
+        // transaction committed, so the runner finds the batch submitted.
+        let batch = refusable(
+            ctx.conn()
+                .and_then(|mut c| svc::ingest::submit(&mut c, &id)),
+        )?;
+        ctx.ingest.spawn_batch(batch.id.clone());
+        Ok(batch)
+    }
+
+    /// Analyses ready or failed item `id` again in the background.
+    fn retry_ingest_item(ctx: &GraphQLContext, id: ID) -> FieldResult<IngestItem> {
+        ctx.require_write()?;
+        let item = refusable(ctx.conn().and_then(|mut c| svc::ingest::retry(&mut c, &id)))?;
+        ctx.ingest.spawn_item(item.id.clone());
+        Ok(item)
+    }
+
+    /// Creates the entity the user reviewed from item `id`'s suggestion
+    /// (`input` holds the user's values) with the item's photos attached,
+    /// each of the kind `photoKinds` gives it, else the kind the model
+    /// suggested.
+    fn accept_ingest_item(
+        ctx: &GraphQLContext,
+        id: ID,
+        input: EntityInput,
+        photo_kinds: Vec<IngestPhotoKindInput>,
+    ) -> FieldResult<Entity> {
+        ctx.require_write()?;
+        let kinds: Vec<(String, AttachmentKind)> =
+            photo_kinds.into_iter().map(Into::into).collect();
+        let (entity, batch) =
+            refusable(svc::entity::EntityInput::try_from(input).and_then(|input| {
+                let mut c = ctx.conn()?;
+                let entity = svc::ingest::accept(&mut c, &id, input, &kinds)?;
+                Ok((entity, svc::ingest::batch_of(&mut c, &id)?))
+            }))?;
+        close_if_done(ctx, &batch);
+        Ok(entity)
+    }
+
+    /// Sets ready or failed item `id` aside, creating nothing.
+    fn skip_ingest_item(ctx: &GraphQLContext, id: ID) -> FieldResult<IngestItem> {
+        ctx.require_write()?;
+        let (item, batch) = refusable(ctx.conn().and_then(|mut c| {
+            let item = svc::ingest::skip(&mut c, &ctx.data_dir, &id)?;
+            Ok((item, svc::ingest::batch_of(&mut c, &id)?))
+        }))?;
+        close_if_done(ctx, &batch);
+        Ok(item)
+    }
+
+    /// Deletes batch `id` with everything staged in it, and ends its
+    /// progress streams.
+    fn delete_ingest_batch(ctx: &GraphQLContext, id: ID) -> FieldResult<bool> {
+        ctx.require_write()?;
+        refusable(
+            ctx.conn()
+                .and_then(|mut c| svc::ingest::delete_batch(&mut c, &ctx.data_dir, &id)),
+        )?;
+        ctx.ingest.events().close(&id);
+        Ok(true)
+    }
+}
+
+/// An ingest service result as a field result. A refusal ([`IngestError`])
+/// answers the client's request, so it goes back as its own message and is
+/// no server error; anything else goes through [`gql`].
+fn refusable<T>(result: anyhow::Result<T>) -> FieldResult<T> {
+    result.or_else(|err| match err.downcast::<IngestError>() {
+        Ok(refusal) => {
+            info!("ingest request refused: {refusal}");
+            Err(FieldError::new(refusal, Value::null()))
+        }
+        Err(err) => gql(Err(err)),
+    })
+}
+
+/// Ends `batch`'s progress streams once it is done: nothing more happens to
+/// it, and a client that reconnects is told so by the stream itself.
+fn close_if_done(ctx: &GraphQLContext, batch: &IngestBatch) {
+    if batch.status == IngestBatchStatus::Done {
+        ctx.ingest.events().close(&batch.id);
     }
 }
 

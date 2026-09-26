@@ -6,6 +6,7 @@ use anyhow::{Result, ensure};
 use chrono::NaiveDate;
 use juniper::{GraphQLInputObject, ID};
 
+use crate::kinds::AttachmentKind;
 use crate::money::Cents;
 use crate::svc;
 
@@ -145,6 +146,19 @@ impl From<AiSettingsInput> for svc::ai_settings::AiSettingsUpdate {
             extra_instructions: input.extra_instructions,
             api_key: input.api_key,
         }
+    }
+}
+
+/// The attachment kind the user chose for one staged photo on accept.
+#[derive(Debug, Clone, GraphQLInputObject)]
+pub struct IngestPhotoKindInput {
+    pub photo_id: ID,
+    pub kind: AttachmentKind,
+}
+
+impl From<IngestPhotoKindInput> for (String, AttachmentKind) {
+    fn from(input: IngestPhotoKindInput) -> Self {
+        (input.photo_id.into(), input.kind)
     }
 }
 

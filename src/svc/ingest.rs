@@ -50,6 +50,8 @@ pub enum IngestError {
     NotCollecting,
     #[error("only an item that is ready or failed can be accepted or skipped")]
     NotReviewable,
+    #[error("only an item that is ready or failed can be retried")]
+    NotRetryable,
     #[error("add at least one photo before submitting")]
     Empty,
     #[error("photo kinds name a photo of another item")]
@@ -84,6 +86,12 @@ pub fn get_photo(conn: &mut SqliteConnection, id: &str) -> Result<Option<IngestP
         .first(conn)
         .optional()
         .with_context(|| format!("loading ingest photo {id:?}"))
+}
+
+/// The batch item `item_id` belongs to.
+pub fn batch_of(conn: &mut SqliteConnection, item_id: &str) -> Result<IngestBatch> {
+    let item = require_item(conn, item_id)?;
+    require_batch(conn, &item.batch_id)
 }
 
 /// The items of batch `batch_id` in position order.
@@ -356,6 +364,24 @@ pub fn set_item_suggestion(
         .execute(conn)
         .with_context(|| format!("storing the suggestion of ingest item {id:?}"))?;
     found(updated, IngestRecord::Item)
+}
+
+/// Puts ready or failed item `item_id` back in the queue, error cleared, for
+/// the runner to analyse again; refused with [`IngestError::NotRetryable`]
+/// otherwise. A reviewing batch goes back to processing, so a restart
+/// mid-retry re-queues the item like any other interrupted one, and the
+/// runner's settle returns the batch to reviewing.
+pub fn retry(conn: &mut SqliteConnection, item_id: &str) -> Result<IngestItem> {
+    // Immediate, as the runner may be writing to the same batch.
+    conn.immediate_transaction(|conn| {
+        let item = require_item(conn, item_id)?;
+        ensure!(item.status.is_reviewable(), IngestError::NotRetryable);
+        set_item_status(conn, item_id, IngestItemStatus::Queued, None)?;
+        if require_batch(conn, &item.batch_id)?.status == IngestBatchStatus::Reviewing {
+            set_batch_status(conn, &item.batch_id, IngestBatchStatus::Processing)?;
+        }
+        require_item(conn, item_id)
+    })
 }
 
 /// Turns reviewable item `item_id` into an entity built from `input` (the
@@ -1373,6 +1399,51 @@ mod tests {
         assert_eq!(
             statuses(&mut conn, &reviewed_batch),
             [IngestItemStatus::Ready]
+        );
+    }
+
+    #[test]
+    fn retry_requeues_a_reviewable_item_and_reopens_its_batch() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let (batch, item, _) = ready_item(&mut conn, None, &[&"cc".repeat(32)]);
+        set_item_status(
+            &mut conn,
+            &item.id,
+            IngestItemStatus::Failed,
+            Some("no answer"),
+        )
+        .unwrap();
+        settle_batch(&mut conn, &batch.id).unwrap();
+        assert_eq!(
+            batch_status(&mut conn, &batch.id),
+            IngestBatchStatus::Reviewing
+        );
+
+        let retried = retry(&mut conn, &item.id).unwrap();
+
+        assert_eq!(retried.status, IngestItemStatus::Queued);
+        assert_eq!(retried.error, None);
+        assert_eq!(
+            batch_status(&mut conn, &batch.id),
+            IngestBatchStatus::Processing
+        );
+        assert_eq!(
+            refusal(retry(&mut conn, &item.id)),
+            IngestError::NotRetryable
+        );
+        let (collecting, open) = ingest_batch(&mut conn, None);
+        assert_eq!(
+            refusal(retry(&mut conn, &open.id)),
+            IngestError::NotRetryable
+        );
+        assert_eq!(
+            batch_status(&mut conn, &collecting.id),
+            IngestBatchStatus::Collecting
+        );
+        assert_eq!(
+            refusal(retry(&mut conn, "missing")),
+            IngestError::NotFound(IngestRecord::Item)
         );
     }
 

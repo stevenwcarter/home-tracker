@@ -9,6 +9,7 @@ mod attachment;
 mod entity;
 mod entity_field;
 mod entity_type;
+mod ingest;
 mod tag;
 
 /// A GraphQL `Int` from a database count or size, saturating at `i32::MAX`
