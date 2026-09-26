@@ -236,7 +236,7 @@ fn smallest_thumbnail(data_dir: &Path, row: &Attachment) -> Result<Thumbnail, Up
             info!(sha256 = %row.sha256, %reason, "refusing an unreadable upload");
             UploadError::Unreadable
         })?;
-    Ok(generated.into_row(row.id.clone(), ThumbSize::SMALLEST, row.created_at)?)
+    Ok(generated.into_row(row.sha256.clone(), ThumbSize::SMALLEST, row.created_at)?)
 }
 
 /// Inserts photo `row` and its `thumb`, making the photo its entity's primary
@@ -361,6 +361,7 @@ mod tests {
 
     use super::*;
     use crate::db::TestDb;
+    use crate::schema::thumbnails;
     use crate::svc::fixtures::{
         SampleIds, attachment as attachment_row, jpeg, png, png_header, png_header_rgba16,
         png_truncated_body, seed_sample,
@@ -534,12 +535,26 @@ mod tests {
         assert_ne!(a.id, b.id);
         assert_eq!(a.sha256, b.sha256);
         assert_eq!(h.files(), [a.sha256.as_str()]);
-
         let mut conn = h.db.pool.get().unwrap();
+        let thumbs = |conn: &mut SqliteConnection| -> i64 {
+            thumbnails::table
+                .filter(thumbnails::sha256.eq(&a.sha256))
+                .count()
+                .get_result(conn)
+                .unwrap()
+        };
+        assert_eq!(thumbs(&mut conn), 1, "the two uploads share one thumbnail");
+
         attachment::delete(&mut conn, h.data.path(), &a.id).unwrap();
         assert_eq!(h.files(), [a.sha256.as_str()], "a shared original stays");
+        assert_eq!(thumbs(&mut conn), 1, "a shared thumbnail stays");
         attachment::delete(&mut conn, h.data.path(), &b.id).unwrap();
         assert!(h.files().is_empty(), "the last delete removes the file");
+        assert_eq!(
+            thumbs(&mut conn),
+            0,
+            "the last delete removes the thumbnail"
+        );
     }
 
     #[test]
@@ -631,7 +646,7 @@ mod tests {
             .upload(&h.ids.screws, &jpeg(640, 480), None, false)
             .unwrap()
             .attachment;
-        let thumb = attachment::thumbnail(&mut h.db.pool.get().unwrap(), &stored.id, 300)
+        let thumb = attachment::thumbnail(&mut h.db.pool.get().unwrap(), &stored.sha256, 300)
             .unwrap()
             .expect("the 300px thumbnail is stored with the upload");
         assert_eq!((thumb.width, thumb.height), (300, 225));

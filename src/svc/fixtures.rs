@@ -36,6 +36,8 @@ pub struct SampleIds {
     pub tools: String,
     pub electronics: String,
     pub photo: String,
+    /// The content hash of `photo`'s original, which keys its thumbnail.
+    pub photo_sha256: String,
     pub manual: String,
     pub tote_type: String,
 }
@@ -137,6 +139,7 @@ pub fn seed_sample(conn: &mut SqliteConnection) -> SampleIds {
         tools: "t-tools".to_owned(),
         electronics: "t-electronics".to_owned(),
         photo: "a-drill-photo".to_owned(),
+        photo_sha256: "aa".repeat(32),
         manual: "a-drill-manual".to_owned(),
         tote_type: "t-tote".to_owned(),
     };
@@ -217,7 +220,7 @@ pub fn seed_sample(conn: &mut SqliteConnection) -> SampleIds {
                 &ids.drill,
                 AttachmentKind::Photo,
                 true,
-                &"aa".repeat(32),
+                &ids.photo_sha256,
                 3,
                 12,
             ),
@@ -235,7 +238,7 @@ pub fn seed_sample(conn: &mut SqliteConnection) -> SampleIds {
         .expect("insert sample attachments");
     diesel::insert_into(thumbnails::table)
         .values(Thumbnail {
-            attachment_id: ids.photo.clone(),
+            sha256: ids.photo_sha256.clone(),
             size: 500,
             mime_type: "image/webp".to_owned(),
             width: 4,

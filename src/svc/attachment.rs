@@ -111,21 +111,23 @@ fn version_tag(sha256: &str) -> &str {
     &sha256[..sha256.len().min(12)]
 }
 
-/// The stored thumbnail of exactly `size`; no fallback to another size.
+/// The stored `size` thumbnail of the original with `sha256`; no fallback
+/// to another size.
 pub fn thumbnail(
     conn: &mut SqliteConnection,
-    attachment_id: &str,
+    sha256: &str,
     size: i32,
 ) -> Result<Option<Thumbnail>> {
     thumbnails::table
-        .find((attachment_id, size))
+        .find((sha256, size))
         .select(Thumbnail::as_select())
         .first(conn)
         .optional()
-        .with_context(|| format!("loading the {size}px thumbnail of attachment {attachment_id:?}"))
+        .with_context(|| format!("loading the {size}px thumbnail of {sha256:?}"))
 }
 
-/// Stores `thumb` unless a row for its `(attachment_id, size)` already exists.
+/// Stores `thumb` unless a row for its `(sha256, size)` already exists: the
+/// same bytes make the same thumbnail, so the first one stored wins.
 pub fn insert_thumbnail(conn: &mut SqliteConnection, thumb: &Thumbnail) -> Result<()> {
     diesel::insert_into(thumbnails::table)
         .values(thumb)
@@ -133,10 +135,18 @@ pub fn insert_thumbnail(conn: &mut SqliteConnection, thumb: &Thumbnail) -> Resul
         .execute(conn)
         .with_context(|| {
             format!(
-                "storing the {}px thumbnail of attachment {:?}",
-                thumb.size, thumb.attachment_id
+                "storing the {}px thumbnail of {:?}",
+                thumb.size, thumb.sha256
             )
         })?;
+    Ok(())
+}
+
+/// Deletes every stored thumbnail of the original with `sha256`.
+pub fn delete_thumbnails(conn: &mut SqliteConnection, sha256: &str) -> Result<()> {
+    diesel::delete(thumbnails::table.filter(thumbnails::sha256.eq(sha256)))
+        .execute(conn)
+        .with_context(|| format!("deleting the thumbnails of {sha256:?}"))?;
     Ok(())
 }
 
@@ -145,11 +155,11 @@ fn require(conn: &mut SqliteConnection, id: &str) -> Result<Attachment> {
     get(conn, id)?.ok_or_else(|| anyhow!("attachment not found"))
 }
 
-/// Deletes attachment `id`; its thumbnails go with it by foreign key. When it
-/// was its entity's primary photo, the earliest remaining photo that can be
-/// thumbnailed takes over, just as the first photo uploaded becomes primary.
-/// The original file is removed once the row is gone, when no other
-/// attachment shares its hash.
+/// Deletes attachment `id`. When it was its entity's primary photo, the
+/// earliest remaining photo that can be thumbnailed takes over, just as the
+/// first photo uploaded becomes primary. The original file and its
+/// thumbnails are removed once the row is gone, when no other attachment
+/// shares its hash.
 pub fn delete(conn: &mut SqliteConnection, data_dir: &Path, id: &str) -> Result<()> {
     let orphan = conn.transaction(|conn| {
         let row = require(conn, id)?;
@@ -245,12 +255,13 @@ impl Drop for PlacingOriginal {
     }
 }
 
-/// Removes the original with `sha256` from `data_dir` unless an upload is
-/// placing it or an attachment references it. Both are checked under the
-/// placing lock, so an upload that committed its row after the caller's own
-/// sharer count still keeps its file. The caller's rows are already
-/// committed as deleted, so a failure only leaks disk space: it is logged
-/// rather than reported, and an already-missing file is fine.
+/// Removes the original with `sha256` from `data_dir`, and its thumbnail
+/// rows, unless an upload is placing it or an attachment references it.
+/// Both are checked under the placing lock, so an upload that committed its
+/// row after the caller's own sharer count still keeps its file and
+/// thumbnails. The caller's rows are already committed as deleted, so a
+/// failure only leaks space: it is logged rather than reported, and an
+/// already-missing file is fine.
 pub(crate) fn remove_original(conn: &mut SqliteConnection, data_dir: &Path, sha256: &str) {
     let path = original_path(data_dir, sha256);
     // PLACING is held across the COUNT on purpose: a claim taken after this
@@ -267,6 +278,9 @@ pub(crate) fn remove_original(conn: &mut SqliteConnection, data_dir: &Path, sha2
             warn!(%sha256, "not removing an original: {err:#}");
             return;
         }
+    }
+    if let Err(err) = delete_thumbnails(conn, sha256) {
+        warn!(%sha256, "could not remove the thumbnails of an unreferenced original: {err:#}");
     }
     if let Err(err) = fs::remove_file(&path)
         && err.kind() != ErrorKind::NotFound
@@ -363,10 +377,16 @@ mod tests {
         let db = TestDb::new();
         let mut conn = db.pool.get().unwrap();
         let ids = seed_sample(&mut conn);
-        let thumb = thumbnail(&mut conn, &ids.photo, 500).unwrap().unwrap();
+        let thumb = thumbnail(&mut conn, &ids.photo_sha256, 500)
+            .unwrap()
+            .unwrap();
         assert_eq!(thumb.width, 4);
         assert_eq!(thumb.data.len(), 8);
-        assert!(thumbnail(&mut conn, &ids.photo, 300).unwrap().is_none());
+        assert!(
+            thumbnail(&mut conn, &ids.photo_sha256, 300)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -394,7 +414,6 @@ mod tests {
 
         delete(&mut conn, data.path(), &ids.photo).unwrap();
         assert!(get(&mut conn, &ids.photo).unwrap().is_none());
-        assert!(thumbnail(&mut conn, &ids.photo, 500).unwrap().is_none());
         assert!(file.exists(), "a shared original must stay");
 
         delete(&mut conn, data.path(), "a-screws-photo").unwrap();
@@ -405,6 +424,42 @@ mod tests {
         assert!(get(&mut conn, &ids.manual).unwrap().is_none());
         let err = delete(&mut conn, data.path(), &ids.manual).unwrap_err();
         assert_eq!(err.to_string(), "attachment not found");
+    }
+
+    #[test]
+    fn deleting_the_last_sharer_removes_its_thumbnails() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let (data, file) = data_with_drill_photo();
+        let sha = &ids.photo_sha256;
+        insert(
+            &mut conn,
+            attachment(
+                "a-screws-photo",
+                &ids.screws,
+                AttachmentKind::Photo,
+                true,
+                sha,
+                5,
+                20,
+            ),
+        );
+        let sizes = |conn: &mut SqliteConnection| -> Vec<i32> {
+            thumbnails::table
+                .filter(thumbnails::sha256.eq(sha))
+                .select(thumbnails::size)
+                .load(conn)
+                .unwrap()
+        };
+
+        delete(&mut conn, data.path(), &ids.photo).unwrap();
+        assert_eq!(sizes(&mut conn), [500], "a shared thumbnail must stay");
+        assert!(file.exists());
+
+        delete(&mut conn, data.path(), "a-screws-photo").unwrap();
+        assert!(sizes(&mut conn).is_empty(), "an unshared thumbnail must go");
+        assert!(!file.exists());
     }
 
     #[test]

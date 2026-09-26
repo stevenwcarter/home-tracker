@@ -49,8 +49,13 @@ impl Harness {
     }
 
     fn import(&self) -> anyhow::Result<ImportReport> {
+        self.import_from(self.backup.path())
+    }
+
+    /// Imports the backup exploded into `dir` into this harness's database.
+    fn import_from(&self, dir: &Path) -> anyhow::Result<ImportReport> {
         let mut conn = self.db.pool.get().unwrap();
-        let mut source = DirSource::new(self.backup.path());
+        let mut source = DirSource::new(dir);
         import_backup(&mut conn, &mut source, self.data.path())
     }
 
@@ -310,7 +315,7 @@ fn originals_are_content_addressed_and_thumbnails_stored_at_500() {
             .is_none()
     );
 
-    let thumb = svc::attachment::thumbnail(&mut conn, &h.ids.photo, 500)
+    let thumb = svc::attachment::thumbnail(&mut conn, &h.ids.jpeg_sha256, 500)
         .unwrap()
         .unwrap();
     assert_eq!((thumb.width, thumb.height), (4, 3));
@@ -509,7 +514,7 @@ fn a_photo_whose_thumbnail_blob_is_missing_still_imports() {
         .unwrap();
     assert_eq!(photo.sha256, h.ids.jpeg_sha256);
     assert!(
-        svc::attachment::thumbnail(&mut conn, &h.ids.photo, 500)
+        svc::attachment::thumbnail(&mut conn, &h.ids.jpeg_sha256, 500)
             .unwrap()
             .is_none()
     );
@@ -555,7 +560,7 @@ fn zip_with_a_single_top_level_folder_is_accepted() {
 fn reimport_with_a_recoloured_photo(new_thumb: Option<&[u8]>) -> (Harness, String) {
     let h = Harness::new();
     h.import().unwrap();
-    let old = svc::attachment::thumbnail(&mut h.conn(), &h.ids.photo, 500)
+    let old = svc::attachment::thumbnail(&mut h.conn(), &h.ids.jpeg_sha256, 500)
         .unwrap()
         .unwrap();
     diesel::insert_into(thumbnails::table)
@@ -582,13 +587,15 @@ fn changed_bytes_invalidate_thumbnails() {
         .unwrap()
         .unwrap();
     assert_eq!(photo.sha256, new_sha256);
-    for size in [300, 500] {
-        assert!(
-            svc::attachment::thumbnail(&mut conn, &h.ids.photo, size)
-                .unwrap()
-                .is_none(),
-            "the stale {size}px thumbnail survived"
-        );
+    for sha256 in [&h.ids.jpeg_sha256, &new_sha256] {
+        for size in [300, 500] {
+            assert!(
+                svc::attachment::thumbnail(&mut conn, sha256, size)
+                    .unwrap()
+                    .is_none(),
+                "a {size}px thumbnail of {sha256} exists"
+            );
+        }
     }
 }
 
@@ -602,21 +609,63 @@ fn changed_bytes_store_the_new_thumbnail() {
         .unwrap();
     assert_eq!(photo.sha256, new_sha256);
     assert!(
-        svc::attachment::thumbnail(&mut conn, &h.ids.photo, 300)
+        svc::attachment::thumbnail(&mut conn, &new_sha256, 300)
             .unwrap()
             .is_none()
     );
-    let thumb = svc::attachment::thumbnail(&mut conn, &h.ids.photo, 500)
+    let thumb = svc::attachment::thumbnail(&mut conn, &new_sha256, 500)
         .unwrap()
         .unwrap();
     assert_eq!(thumb.data, webp);
 }
 
 #[test]
+fn a_reimport_with_changed_bytes_leaves_no_orphaned_thumbnails() {
+    // Review focus 1: the old bytes' original and thumbnails go with them.
+    let h = Harness::new();
+    h.import().unwrap();
+    let old_sha256 = h.ids.jpeg_sha256.clone();
+    let old = svc::attachment::thumbnail(&mut h.conn(), &old_sha256, 500)
+        .unwrap()
+        .unwrap();
+    // A size generated on demand since the first import.
+    diesel::insert_into(thumbnails::table)
+        .values(Thumbnail { size: 300, ..old })
+        .execute(&mut h.conn())
+        .unwrap();
+
+    let second = tempfile::tempdir().unwrap();
+    MiniBackup::write_dir(second.path());
+    let (jpeg, webp) = recoloured_photo([30, 200, 30]);
+    let blobs = second.path().join("attachments");
+    fs::write(blobs.join(&h.ids.photo), &jpeg).unwrap();
+    fs::write(blobs.join(&h.ids.thumb), &webp).unwrap();
+    h.import_from(second.path()).unwrap();
+
+    let new_sha256 = hex::encode(Sha256::digest(&jpeg));
+    let mut conn = h.conn();
+    let stale: i64 = thumbnails::table
+        .filter(thumbnails::sha256.eq(&old_sha256))
+        .count()
+        .get_result(&mut conn)
+        .unwrap();
+    assert_eq!(stale, 0, "the old bytes' thumbnails were orphaned");
+    assert!(
+        !h.data.path().join("originals").join(&old_sha256).exists(),
+        "the old original was orphaned"
+    );
+    let thumb = svc::attachment::thumbnail(&mut conn, &new_sha256, 500)
+        .unwrap()
+        .expect("the new bytes have the imported thumbnail");
+    assert_eq!(thumb.data, webp);
+    assert_eq!(thumbnails::table.count().get_result(&mut conn), Ok(1));
+}
+
+#[test]
 fn unchanged_bytes_keep_other_thumbnail_sizes() {
     let h = Harness::new();
     h.import().unwrap();
-    let old = svc::attachment::thumbnail(&mut h.conn(), &h.ids.photo, 500)
+    let old = svc::attachment::thumbnail(&mut h.conn(), &h.ids.jpeg_sha256, 500)
         .unwrap()
         .unwrap();
     diesel::insert_into(thumbnails::table)
@@ -625,7 +674,7 @@ fn unchanged_bytes_keep_other_thumbnail_sizes() {
         .unwrap();
     h.import().unwrap();
     assert!(
-        svc::attachment::thumbnail(&mut h.conn(), &h.ids.photo, 300)
+        svc::attachment::thumbnail(&mut h.conn(), &h.ids.jpeg_sha256, 300)
             .unwrap()
             .is_some()
     );

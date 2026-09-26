@@ -16,7 +16,9 @@ pub type SqlitePool = Pool<ConnectionManager<SqliteConnection>>;
 pub const LOCATION_TYPE_ID: &str = "00000000-0000-7000-8000-000000000001";
 pub const ITEM_TYPE_ID: &str = "00000000-0000-7000-8000-000000000002";
 
-const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
+/// Every migration under `migrations/`, compiled into the binary. Public so a
+/// test can run them one at a time to check that a migration keeps old data.
+pub const MIGRATIONS: EmbeddedMigrations = embed_migrations!();
 
 /// Sets the per-connection PRAGMAs. `busy_timeout` goes first so a locked
 /// database waits instead of failing the PRAGMAs that follow.

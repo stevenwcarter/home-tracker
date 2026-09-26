@@ -1,11 +1,13 @@
 //! Upserts a Homebox backup in dependency order inside one transaction.
 //!
 //! Every table is upserted by primary key, so re-running an import refreshes
-//! rows in place and never deletes anything. Links (parents, tags, templates)
-//! are written in a second pass once both ends exist; a link whose target is not
-//! in the backup, or an entity parent link that would form a cycle, is dropped
-//! with a warning rather than failing the import. An attachment whose bytes
-//! changed since the last import loses its stored thumbnails.
+//! rows in place and never deletes a row the backup holds. Links (parents,
+//! tags, templates) are written in a second pass once both ends exist; a link
+//! whose target is not in the backup, or an entity parent link that would
+//! form a cycle, is dropped with a warning rather than failing the import.
+//! When an attachment's bytes changed since the last import, its old original
+//! and that original's thumbnails are removed once the import commits, unless
+//! something else still shares them.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
@@ -37,7 +39,7 @@ use crate::schema::{
     attachments, entities, entity_fields, entity_templates, entity_types, tag_entities, tags,
     template_fields, thumbnails,
 };
-use crate::svc::tag;
+use crate::svc::{attachment, tag};
 
 const SUPPORTED_SCHEMA_VERSION: i64 = 1;
 /// Homebox's stored thumbnails are 500px renditions; we keep them at that size.
@@ -112,7 +114,7 @@ pub fn import_backup(
 
     // Originals are written inside the transaction but are content-addressed,
     // so a rollback at worst leaves an unreferenced file that the next run reuses.
-    conn.transaction::<_, anyhow::Error, _>(|conn| {
+    let replaced = conn.transaction::<_, anyhow::Error, _>(|conn| {
         let type_ids = import_entity_types(conn, &backup.types, &mut report)?;
         let template_ids = import_templates(
             conn,
@@ -135,6 +137,10 @@ pub fn import_backup(
             &mut report,
         )
     })?;
+    // Only once the new hashes are committed can the old ones be unshared.
+    for sha256 in replaced {
+        attachment::remove_original(conn, data_dir, &sha256);
+    }
     Ok(report)
 }
 
@@ -621,6 +627,8 @@ fn import_tag_links(
     Ok(())
 }
 
+/// Upserts the attachments and their Homebox thumbnails. Returns the hashes
+/// the upserts replaced, whose originals may now be unreferenced.
 fn import_attachments(
     conn: &mut SqliteConnection,
     source: &mut dyn Source,
@@ -628,11 +636,12 @@ fn import_attachments(
     entity_ids: &HashSet<String>,
     originals_dir: &Path,
     report: &mut ImportReport,
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let (thumbs, files): (Vec<&AttachmentRow>, Vec<&AttachmentRow>) =
         rows.iter().partition(|r| r.kind == THUMBNAIL_KIND);
     let thumbs: HashMap<&str, &AttachmentRow> =
         thumbs.into_iter().map(|t| (t.id.as_str(), t)).collect();
+    let mut replaced = Vec::new();
 
     for row in files {
         let what = format!("attachment {}", row.id);
@@ -670,7 +679,7 @@ fn import_attachments(
         if store_original(originals_dir, &sha256, &bytes)? {
             report.originals_written += 1;
         }
-        invalidate_stale_thumbnails(conn, &row.id, &sha256)?;
+        replaced.extend(replaced_sha256(conn, &row.id, &sha256)?);
         let (created_at, updated_at) = stamps(&row.created_at, &row.updated_at, &what)?;
         upsert!(
             conn,
@@ -684,7 +693,7 @@ fn import_attachments(
                 is_primary: row.primary,
                 title: row.title.clone(),
                 mime_type: row.mime_type.clone(),
-                sha256,
+                sha256: sha256.clone(),
                 size_bytes: i64::try_from(bytes.len())
                     .with_context(|| format!("{what} is too large"))?,
                 created_at,
@@ -697,43 +706,40 @@ fn import_attachments(
                 conn,
                 source,
                 &row.id,
+                &sha256,
                 thumbs.get(thumb_id.as_str()).copied(),
                 report,
             )?;
         }
     }
-    Ok(())
+    Ok(replaced)
 }
 
-/// Deletes every stored thumbnail of `attachment_id` when the attachment already
-/// exists with bytes other than `sha256`: thumbnails are keyed by attachment and
-/// size, not by content, so they would otherwise keep showing the old picture.
-fn invalidate_stale_thumbnails(
+/// The hash `attachment_id` is stored with, when it exists with bytes other
+/// than `sha256`: the upsert about to run replaces it.
+fn replaced_sha256(
     conn: &mut SqliteConnection,
     attachment_id: &str,
     sha256: &str,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let previous: Option<String> = attachments::table
         .find(attachment_id)
         .select(attachments::sha256)
         .first(conn)
         .optional()
         .with_context(|| format!("reading the digest of attachment {attachment_id}"))?;
-    if previous.is_some_and(|old| old != sha256) {
-        diesel::delete(thumbnails::table.filter(thumbnails::attachment_id.eq(attachment_id)))
-            .execute(conn)
-            .with_context(|| format!("deleting stale thumbnails of attachment {attachment_id}"))?;
-    }
-    Ok(())
+    Ok(previous.filter(|old| old != sha256))
 }
 
-/// Stores Homebox's pre-rendered thumbnail of `attachment_id` as our 500px
-/// variant. A missing or undecodable thumbnail is only a warning: the original
-/// is imported and a thumbnail can be regenerated from it.
+/// Stores Homebox's pre-rendered thumbnail of `attachment_id`, whose bytes
+/// hash to `sha256`, as that original's 500px variant. A missing or
+/// undecodable thumbnail is only a warning: the original is imported and a
+/// thumbnail can be regenerated from it.
 fn import_thumbnail(
     conn: &mut SqliteConnection,
     source: &mut dyn Source,
     attachment_id: &str,
+    sha256: &str,
     thumb: Option<&AttachmentRow>,
     report: &mut ImportReport,
 ) -> Result<()> {
@@ -779,9 +785,9 @@ fn import_thumbnail(
         conn,
         report,
         thumbnails,
-        (attachment_id, HOMEBOX_THUMBNAIL_SIZE),
+        (sha256, HOMEBOX_THUMBNAIL_SIZE),
         Thumbnail {
-            attachment_id: attachment_id.to_owned(),
+            sha256: sha256.to_owned(),
             size: HOMEBOX_THUMBNAIL_SIZE,
             mime_type: thumb.mime_type.clone(),
             width,

@@ -11,11 +11,13 @@ use std::thread;
 
 use axum_test::{TestResponse, TestServer};
 use diesel::prelude::*;
-use home_tracker::db::TestDb;
+use diesel_migrations::MigrationHarness;
+use home_tracker::db::{self, ITEM_TYPE_ID, MIGRATIONS, TestDb};
 use home_tracker::kinds::AttachmentKind;
 use home_tracker::models::Thumbnail;
 use home_tracker::routes::app_with_thumbnails;
 use home_tracker::schema::{attachments, thumbnails};
+use home_tracker::svc::blob::Blob;
 use home_tracker::svc::fixtures::{self, SampleIds, jpeg, png, seed_sample};
 use home_tracker::svc::thumbnail::{ThumbSize, allowed_size};
 use home_tracker::svc::thumbnail_service::ThumbnailService;
@@ -94,9 +96,17 @@ impl Fixture {
         self.add_file(id, "photo.jpg", "image/jpeg", &jpeg(1600, 1200))
     }
 
+    /// The stored thumbnail sizes of attachment `id`'s original.
     fn thumb_sizes(&self, id: &str) -> Vec<i32> {
         thumbnails::table
-            .filter(thumbnails::attachment_id.eq(id))
+            .filter(
+                thumbnails::sha256.eq_any(
+                    attachments::table
+                        .find(id)
+                        .select(attachments::sha256)
+                        .into_boxed(),
+                ),
+            )
             .select(thumbnails::size)
             .order(thumbnails::size.asc())
             .load(&mut self.db.pool.get().unwrap())
@@ -332,7 +342,7 @@ async fn imported_homebox_thumbnail_is_served_without_generation() {
     let stored = b"RIFF\x0c\0\0\0WEBPVP8 fake".to_vec();
     diesel::insert_into(thumbnails::table)
         .values(Thumbnail {
-            attachment_id: "att-1".to_owned(),
+            sha256: sha.clone(),
             size: 500,
             mime_type: "image/webp".to_owned(),
             width: 500,
@@ -530,11 +540,14 @@ async fn thumb_size_newtype_is_used_end_to_end() {
     let size: ThumbSize = allowed_size(301).unwrap();
     assert_eq!(size.get(), 500);
     let f = Fixture::new();
-    f.add_photo("att-1");
+    let blob = Blob {
+        sha256: f.add_photo("att-1"),
+        mime_type: "image/jpeg".to_owned(),
+    };
 
-    let (_, thumb) = f
+    let thumb = f
         .thumbs
-        .get_or_generate("att-1", size)
+        .get_or_generate(&blob, size)
         .await
         .unwrap()
         .unwrap();
@@ -561,4 +574,101 @@ async fn read_failures_are_500_without_filesystem_paths() {
         assert!(!body.contains(&data_dir), "{url} leaks a path: {body}");
         assert!(!body.contains(&sha), "{url} leaks the file name: {body}");
     }
+}
+
+#[tokio::test]
+async fn two_attachments_sharing_bytes_share_one_thumbnail() {
+    let f = Fixture::new();
+    let bytes = jpeg(640, 480);
+    let sha = f.add_file("att-1", "a.jpg", "image/jpeg", &bytes);
+    f.add_file("att-2", "b.jpg", "image/jpeg", &bytes);
+
+    for id in ["att-1", "att-2"] {
+        let response = f.server.get(&format!("/attachments/{id}/thumb/300")).await;
+        response.assert_status_ok();
+        assert_eq!(header(&response, "etag"), format!("\"{sha}-300\""));
+    }
+
+    assert_eq!(f.thumbs.generations(), 1);
+    let rows: i64 = thumbnails::table
+        .count()
+        .get_result(&mut f.db.pool.get().unwrap())
+        .unwrap();
+    // The sample photo's imported 500px thumbnail plus the one shared 300px.
+    assert_eq!(rows, 2);
+    assert_eq!(f.thumb_sizes("att-2"), [300]);
+}
+
+/// The migration that re-keys thumbnails by content hash.
+const THUMBNAILS_BY_SHA: &str = "2026-09-26-100000_thumbnails_by_sha";
+
+#[tokio::test]
+async fn existing_thumbnails_survive_the_migration() {
+    // Review focus 1: a database written before the re-keying keeps serving
+    // its stored thumbnails at the same URL with the same bytes.
+    let dir = tempfile::tempdir().unwrap();
+    let pool = db::build_pool(dir.path().join("old.sqlite").to_str().unwrap()).unwrap();
+    let mut conn = pool.get().unwrap();
+    let earlier = conn.pending_migrations(MIGRATIONS).unwrap();
+    for migration in earlier
+        .iter()
+        .filter(|m| m.name().to_string() != THUMBNAILS_BY_SHA)
+    {
+        conn.run_migration(migration.as_ref()).unwrap();
+    }
+
+    let sha = "5e".repeat(32);
+    diesel::insert_into(home_tracker::schema::entities::table)
+        .values(fixtures::entity("e-1", "Drill", ITEM_TYPE_ID, None, 1))
+        .execute(&mut conn)
+        .unwrap();
+    for id in ["att-1", "att-2"] {
+        diesel::insert_into(attachments::table)
+            .values(fixtures::attachment(
+                id,
+                "e-1",
+                AttachmentKind::Photo,
+                id == "att-1",
+                &sha,
+                10,
+                2,
+            ))
+            .execute(&mut conn)
+            .unwrap();
+        // Old shape: one row per attachment, even for identical bytes.
+        diesel::sql_query(
+            "INSERT INTO thumbnails (attachment_id, size, mime_type, width, height, data) \
+             VALUES (?, 500, 'image/webp', 10, 8, CAST('webp-bytes' AS BLOB))",
+        )
+        .bind::<diesel::sql_types::Text, _>(id)
+        .execute(&mut conn)
+        .unwrap();
+    }
+
+    db::run_migrations(&mut conn).unwrap();
+    assert!(conn.pending_migrations(MIGRATIONS).unwrap().is_empty());
+
+    let rows: Vec<(String, i32, i32, i32, Vec<u8>)> = thumbnails::table
+        .select((
+            thumbnails::sha256,
+            thumbnails::size,
+            thumbnails::width,
+            thumbnails::height,
+            thumbnails::data,
+        ))
+        .load(&mut conn)
+        .unwrap();
+    assert_eq!(rows, [(sha.clone(), 500, 10, 8, b"webp-bytes".to_vec())]);
+
+    // No original is on disk: only the migrated row can answer.
+    let data = tempfile::tempdir().unwrap();
+    let thumbs = ThumbnailService::new(pool.clone(), data.path().to_path_buf());
+    let server = TestServer::new(app_with_thumbnails(pool.clone(), thumbs.clone()));
+    for id in ["att-1", "att-2"] {
+        let response = server.get(&format!("/attachments/{id}/thumb/500")).await;
+        response.assert_status_ok();
+        assert_eq!(response.as_bytes().as_ref(), b"webp-bytes");
+        assert_eq!(header(&response, "etag"), format!("\"{sha}-500\""));
+    }
+    assert_eq!(thumbs.generations(), 0);
 }

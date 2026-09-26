@@ -24,11 +24,14 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
+use tracing::Instrument;
 
 use crate::api::{AppError, IMMUTABLE_CACHE};
 use crate::db::SqlitePool;
+use crate::models::Attachment;
 use crate::svc::attachment;
-use crate::svc::thumbnail::allowed_size;
+use crate::svc::blob::Blob;
+use crate::svc::thumbnail::{allowed_size, is_thumbnailable};
 use crate::svc::thumbnail_service::ThumbnailService;
 
 /// The attachment routes, with their state layered on. Originals are read
@@ -58,10 +61,7 @@ async fn original(
     Extension(pool): Extension<SqlitePool>,
     Extension(data_dir): Extension<Arc<PathBuf>>,
 ) -> Result<Response, AppError> {
-    let att = {
-        let mut conn = pool.get().context("db connection")?;
-        attachment::get(&mut conn, &id)?
-    };
+    let att = load(&pool, &id)?;
     let Some(att) = att else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
@@ -102,12 +102,24 @@ async fn original(
 
 async fn thumb(
     Path((id, size)): Path<(String, String)>,
+    Extension(pool): Extension<SqlitePool>,
     Extension(thumbnails): Extension<Arc<ThumbnailService>>,
 ) -> Result<Response, AppError> {
     let Some(size) = size.parse::<i64>().ok().and_then(allowed_size) else {
         return Ok((StatusCode::BAD_REQUEST, "size must be a positive integer").into_response());
     };
-    let Some((att, thumb)) = thumbnails.get_or_generate(&id, size).await? else {
+    let att = load(&pool, &id)?;
+    let Some(att) = att.filter(|att| is_thumbnailable(&att.mime_type)) else {
+        return Ok(StatusCode::NOT_FOUND.into_response());
+    };
+    // The span puts the attachment id on the service's log lines, which only
+    // know the blob.
+    let thumb = thumbnails
+        .get_or_generate(&Blob::from(&att), size)
+        .instrument(tracing::info_span!("thumb", %id))
+        .await
+        .with_context(|| format!("thumbnail of attachment {id:?}"))?;
+    let Some(thumb) = thumb else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
     Ok((
@@ -127,6 +139,12 @@ async fn thumb(
         thumb.data,
     )
         .into_response())
+}
+
+/// Attachment `id`, if it exists.
+fn load(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Attachment>> {
+    let mut conn = pool.get().context("db connection")?;
+    attachment::get(&mut conn, id)
 }
 
 /// A strong ETag: `tag` in double quotes.

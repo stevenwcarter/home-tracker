@@ -25,15 +25,16 @@ pub struct Generated {
 }
 
 impl Generated {
-    /// The thumbnail row storing this as `attachment_id`'s `size` thumbnail.
+    /// The thumbnail row storing this as the `size` thumbnail of the
+    /// original whose content hash is `sha256`.
     pub fn into_row(
         self,
-        attachment_id: String,
+        sha256: String,
         size: ThumbSize,
         created_at: NaiveDateTime,
     ) -> Result<Thumbnail> {
         Ok(Thumbnail {
-            attachment_id,
+            sha256,
             size: i32::try_from(size.get()).context("thumbnail size out of range")?,
             mime_type: GENERATED_MIME.to_owned(),
             width: i32::try_from(self.width).context("thumbnail width out of range")?,

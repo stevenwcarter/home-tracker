@@ -144,8 +144,8 @@ diesel::table! {
 }
 
 diesel::table! {
-    thumbnails (attachment_id, size) {
-        attachment_id -> Text,
+    thumbnails (sha256, size) {
+        sha256 -> Text,
         size -> Integer,
         mime_type -> Text,
         width -> Integer,
@@ -163,7 +163,6 @@ diesel::joinable!(entity_types -> entity_templates (default_template_id));
 diesel::joinable!(tag_entities -> entities (entity_id));
 diesel::joinable!(tag_entities -> tags (tag_id));
 diesel::joinable!(template_fields -> entity_templates (template_id));
-diesel::joinable!(thumbnails -> attachments (attachment_id));
 
 diesel::allow_tables_to_appear_in_same_query!(
     attachments,

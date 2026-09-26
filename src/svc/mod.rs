@@ -3,6 +3,7 @@
 use anyhow::{Result, ensure};
 
 pub mod attachment;
+pub mod blob;
 pub mod entity;
 pub mod entity_field;
 pub mod entity_type;
