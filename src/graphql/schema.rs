@@ -1,13 +1,14 @@
-use juniper::{EmptyMutation, EmptySubscription, FieldError, FieldResult, RootNode};
+use juniper::{EmptySubscription, FieldError, FieldResult, RootNode};
 use tracing::error;
 
 use super::context::GraphQLContext;
+use super::mutation::Mutation;
 use super::query::Query;
 
-pub type Schema = RootNode<Query, EmptyMutation<GraphQLContext>, EmptySubscription<GraphQLContext>>;
+pub type Schema = RootNode<Query, Mutation, EmptySubscription<GraphQLContext>>;
 
 pub fn create_schema() -> Schema {
-    Schema::new(Query, EmptyMutation::new(), EmptySubscription::new())
+    Schema::new(Query, Mutation, EmptySubscription::new())
 }
 
 /// Converts an `anyhow::Result` into a juniper `FieldResult`, logging failures.

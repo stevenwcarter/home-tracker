@@ -66,6 +66,9 @@ pub fn app(pool: SqlitePool, data_dir: PathBuf) -> Router {
 /// [`app`] around a caller-supplied thumbnail service, so tests can observe it.
 pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
     let schema = Arc::new(create_schema());
+    // The thumbnail service's data dir is the one the attachment routes read,
+    // so a GraphQL delete removes originals from the same place.
+    let data_dir = Arc::from(thumbnails.data_dir());
     let compressed = Router::new()
         .route("/assets/{*path}", get(static_handler))
         // Load-bearing position: `Router::layer` only wraps routes already added, so
@@ -73,7 +76,7 @@ pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) 
         // (and a missing-asset 404) would be cached immutably too. Pinned by
         // tests/spa_routes.rs.
         .layer(middleware::from_fn(immutable_cache))
-        .merge(graphql_routes(pool.clone(), schema))
+        .merge(graphql_routes(pool.clone(), schema, data_dir))
         .route("/", get(index_handler))
         .fallback(get(index_handler))
         .layer(CompressionLayer::new());

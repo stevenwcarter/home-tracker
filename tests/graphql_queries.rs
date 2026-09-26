@@ -310,7 +310,12 @@ async fn argument_types_and_defaults_match_the_spec() {
             query: __type(name: "Query") { fields { name args { name defaultValue type { kind name ofType { name } } } } }
             attachment: __type(name: "Attachment") { fields { name args { name defaultValue type { kind name ofType { name } } } } }
             entity: __type(name: "Entity") { fields { name type { kind name ofType { name } } } }
-        }"#,
+            mutation: __type(name: "Mutation") { fields { name args { name type { ...Ref } } type { ...Ref } } }
+            entityInput: __type(name: "EntityInput") { inputFields { name type { ...Ref } } }
+            entityTypeInput: __type(name: "EntityTypeInput") { inputFields { name type { ...Ref } } }
+            tagInput: __type(name: "TagInput") { inputFields { name type { ...Ref } } }
+        }
+        fragment Ref on __Type { kind name ofType { kind name ofType { kind name } } }"#,
         json!({}),
     )
     .await;
@@ -364,4 +369,103 @@ async fn argument_types_and_defaults_match_the_spec() {
         "parentId is nullable"
     );
     assert_eq!(field_type("parentId")["name"], "ID");
+
+    // Spec §6 `type Mutation`: each field's arguments and non-null return type.
+    let mutation_fields = data["mutation"]["fields"].as_array().unwrap();
+    let signature = |f: &Value| {
+        let args: Vec<String> = f["args"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| format!("{}: {}", a["name"].as_str().unwrap(), type_ref(&a["type"])))
+            .collect();
+        format!(
+            "{}({}): {}",
+            f["name"].as_str().unwrap(),
+            args.join(", "),
+            type_ref(&f["type"])
+        )
+    };
+    let signatures: Vec<String> = mutation_fields.iter().map(signature).collect();
+    assert_eq!(
+        signatures,
+        [
+            "createEntity(input: EntityInput!): Entity!",
+            "updateEntity(id: ID!, input: EntityInput!): Entity!",
+            "deleteEntity(id: ID!): Boolean!",
+            "createEntityType(input: EntityTypeInput!): EntityType!",
+            "updateEntityType(id: ID!, input: EntityTypeInput!): EntityType!",
+            "deleteEntityType(id: ID!): Boolean!",
+            "createTag(input: TagInput!): Tag!",
+            "updateTag(id: ID!, input: TagInput!): Tag!",
+            "deleteTag(id: ID!): Boolean!",
+            "deleteAttachment(id: ID!): Boolean!",
+            "setPrimaryPhoto(attachmentId: ID!): Entity!",
+        ]
+    );
+
+    // Spec §6 input objects: field names and types, in declaration order.
+    let input_fields = |ty: &str| -> Vec<String> {
+        data[ty]["inputFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| format!("{}: {}", f["name"].as_str().unwrap(), type_ref(&f["type"])))
+            .collect()
+    };
+    assert_eq!(
+        input_fields("entityInput"),
+        [
+            "name: String!",
+            "description: String",
+            "entityTypeId: ID!",
+            "parentId: ID",
+            "archived: Boolean",
+            "quantity: Float",
+            "insured: Boolean",
+            "serialNumber: String",
+            "modelNumber: String",
+            "manufacturer: String",
+            "notes: String",
+            "lifetimeWarranty: Boolean",
+            "warrantyExpires: LocalDate",
+            "warrantyDetails: String",
+            "purchaseDate: LocalDate",
+            "purchaseFrom: String",
+            "purchasePriceCents: Int",
+            "soldDate: LocalDate",
+            "soldTo: String",
+            "soldPriceCents: Int",
+            "soldNotes: String",
+            "tagIds: [ID!]",
+        ]
+    );
+    assert_eq!(
+        input_fields("entityTypeInput"),
+        [
+            "name: String!",
+            "description: String",
+            "icon: String",
+            "isLocation: Boolean!",
+        ]
+    );
+    assert_eq!(
+        input_fields("tagInput"),
+        [
+            "name: String!",
+            "description: String",
+            "color: String",
+            "icon: String",
+            "parentId: ID",
+        ]
+    );
+}
+
+/// An introspected type reference in SDL notation (`ID!`, `[ID!]`, `Entity`).
+fn type_ref(ty: &Value) -> String {
+    match ty["kind"].as_str().unwrap() {
+        "NON_NULL" => format!("{}!", type_ref(&ty["ofType"])),
+        "LIST" => format!("[{}]", type_ref(&ty["ofType"])),
+        _ => ty["name"].as_str().unwrap().to_owned(),
+    }
 }

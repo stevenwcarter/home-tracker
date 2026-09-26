@@ -1,5 +1,8 @@
 //! Per-request GraphQL context and the authorization seam.
 
+use std::path::Path;
+use std::sync::Arc;
+
 use anyhow::Context as _;
 use diesel::SqliteConnection;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
@@ -38,13 +41,19 @@ impl Actor {
 pub struct GraphQLContext {
     pub pool: SqlitePool,
     pub actor: Actor,
+    /// Where originals live, so deleting an attachment can remove its file.
+    pub data_dir: Arc<Path>,
 }
 
 impl juniper::Context for GraphQLContext {}
 
 impl GraphQLContext {
-    pub fn new(pool: SqlitePool, actor: Actor) -> Self {
-        Self { pool, actor }
+    pub fn new(pool: SqlitePool, actor: Actor, data_dir: impl Into<Arc<Path>>) -> Self {
+        Self {
+            pool,
+            actor,
+            data_dir: data_dir.into(),
+        }
     }
 
     /// One pooled connection for the duration of a resolver.
@@ -80,12 +89,14 @@ mod tests {
     #[test]
     fn read_only_users_are_refused() {
         let db = TestDb::new();
+        let data = tempfile::tempdir().unwrap();
         let ctx = GraphQLContext::new(
             db.pool.clone(),
             Actor::User {
                 id: "u1".to_owned(),
                 role: Role::ReadOnly,
             },
+            data.path(),
         );
         assert!(ctx.require_write().is_err());
         let ctx = GraphQLContext::new(
@@ -94,6 +105,7 @@ mod tests {
                 id: "u1".to_owned(),
                 role: Role::Write,
             },
+            data.path(),
         );
         assert!(ctx.require_write().is_ok());
     }
