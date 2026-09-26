@@ -365,6 +365,12 @@ characters of the attachment's sha256, so the SPA can cache a URL forever and
 still see new bytes after a re-import. The ETag is `"<sha256>"` on the
 original and `"<sha256>-<size>"` on a thumbnail.
 
+Both attachment endpoints also send `X-Content-Type-Options: nosniff` and
+`Content-Security-Policy: sandbox`. The bytes are user-supplied but served
+from the app's origin: `nosniff` stops the browser guessing a more dangerous
+type than the stored one, and `sandbox` makes an HTML or SVG original opened
+directly a sandboxed document that cannot run script on the app origin.
+
 A healthcheck needs no route: the `healthcheck` subcommand connects to
 `127.0.0.1:$PORT`, sends `GET / HTTP/1.0`, reads one byte, exits 0/1.
 
@@ -415,11 +421,20 @@ thumbnail, one custom field).
 - Thumbnails: table `thumbnails`, keyed on `(attachment_id, size)`. Allowed sizes
   are `const THUMB_SIZES: [u32; 3] = [300, 500, 1200]`. Request size is rounded
   up to the first allowed size ≥ it, and anything larger than 1200 clamps to
-  1200. A cache hit streams the blob. A miss:
-  1. checks the attachment's MIME type is one of `image/jpeg`, `image/png`,
-     `image/gif`, `image/webp` (404 otherwise; AVIF is deferred, it needs `nasm`);
-  2. takes a per-key permit from `ThumbnailService { in_flight: Mutex<HashMap<(Uuid,u32), Arc<Notify>>> }`
-     so concurrent misses for the same key wait for the first generator;
+  1200. The endpoint first checks `is_thumbnailable`: the attachment's MIME type
+  (case-insensitive, trimmed) must be one of `image/jpeg`, `image/png`,
+  `image/gif`, `image/webp`, else 404 (AVIF is deferred, it needs `nasm`). This
+  runs before the cache lookup, so it is the single MIME gate: GraphQL's
+  `thumbnailUrl` uses the same function, a non-thumbnailable original never has
+  a thumbnail URL, and a stored thumbnail for one (say an imported HEIC) is
+  never served. Then a cache hit streams the blob. A miss:
+  1. takes a per-key lease on `ThumbnailService`'s map of `(attachment_id, size)`
+     to `Arc<tokio::sync::Mutex<()>>` and locks that key's `Mutex<()>`, so a
+     thumbnail is generated once per `(attachment_id, size)`: concurrent misses
+     for the same key queue on its mutex and find the cached row on a second
+     lookup once the first generator finishes, while different keys proceed
+     independently. The last lease dropped removes the map entry;
+  2. reads the original (404 when the file is missing);
   3. in `spawn_blocking`: decode with `image`, apply EXIF orientation, resize to
      fit `size×size` preserving aspect ratio (never upscale), encode WebP quality
      80 with the `webp` crate;
@@ -486,7 +501,7 @@ Mutations refetch the queries they invalidate (`locations`, `entity`,
 `summary`). Every hook has a vitest test using Apollo's `MockedProvider`.
 
 **Thumbnails in the UI.** A `<Thumb attachment size>` component builds the URL
-with the requested size (300 in lists and the tree, 500 on cards, 1200 on the
+with the requested size (300 in lists, 500 on cards, 1200 on the
 item page) and the server does the rounding.
 
 ## 12. Configuration, build, operations
