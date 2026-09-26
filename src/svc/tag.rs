@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::models::Tag;
 use crate::schema::{tag_entities, tags};
-use crate::svc::required_name;
+use crate::svc::{optional_text, required_name};
 
 /// The fields a caller supplies to create a tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,18 +102,19 @@ fn validate_parent(conn: &mut SqliteConnection, id: Option<&str>, parent_id: &st
 /// (when given) must exist.
 pub fn create(conn: &mut SqliteConnection, input: NewTag) -> Result<Tag> {
     let name = required_name(&input.name)?;
+    let parent_id = optional_text(input.parent_id);
     conn.transaction(|conn| {
-        if let Some(parent_id) = &input.parent_id {
+        if let Some(parent_id) = &parent_id {
             validate_parent(conn, None, parent_id)?;
         }
         let now = Utc::now().naive_utc();
         let row = Tag {
             id: Uuid::now_v7().to_string(),
             name,
-            description: input.description,
-            color: input.color,
-            icon: input.icon,
-            parent_id: input.parent_id,
+            description: optional_text(input.description),
+            color: optional_text(input.color),
+            icon: optional_text(input.icon),
+            parent_id,
             created_at: now,
             updated_at: now,
         };
@@ -129,18 +130,19 @@ pub fn create(conn: &mut SqliteConnection, input: NewTag) -> Result<Tag> {
 /// must not be the tag itself or one of its descendants.
 pub fn update(conn: &mut SqliteConnection, id: &str, changes: TagChanges) -> Result<Tag> {
     let name = required_name(&changes.name)?;
+    let parent_id = optional_text(changes.parent_id);
     conn.transaction(|conn| {
         require(conn, id)?;
-        if let Some(parent_id) = &changes.parent_id {
+        if let Some(parent_id) = &parent_id {
             validate_parent(conn, Some(id), parent_id)?;
         }
         diesel::update(tags::table.find(id))
             .set((
                 tags::name.eq(name),
-                tags::description.eq(changes.description),
-                tags::color.eq(changes.color),
-                tags::icon.eq(changes.icon),
-                tags::parent_id.eq(changes.parent_id),
+                tags::description.eq(optional_text(changes.description)),
+                tags::color.eq(optional_text(changes.color)),
+                tags::icon.eq(optional_text(changes.icon)),
+                tags::parent_id.eq(parent_id),
                 tags::updated_at.eq(Utc::now().naive_utc()),
             ))
             .execute(conn)
@@ -294,5 +296,40 @@ mod tests {
         let electronics = get(&mut conn, &ids.electronics).unwrap().unwrap();
         assert_eq!(electronics.parent_id, None);
         assert!(delete(&mut conn, &ids.tools).is_err());
+    }
+
+    #[test]
+    fn blank_optional_text_is_stored_as_none() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let blanks = NewTag {
+            description: Some("  ".to_owned()),
+            color: Some(String::new()),
+            icon: Some(" \t".to_owned()),
+            parent_id: Some(" ".to_owned()),
+            ..input("Garden", None)
+        };
+        let created = create(&mut conn, blanks.clone()).unwrap();
+        assert_eq!(
+            (
+                created.description,
+                created.color,
+                created.icon,
+                created.parent_id
+            ),
+            (None, None, None, None)
+        );
+        let updated = update(
+            &mut conn,
+            &ids.electronics,
+            NewTag {
+                description: Some(" wires ".to_owned()),
+                ..blanks
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.description.as_deref(), Some("wires"));
+        assert_eq!(updated.parent_id, None);
     }
 }

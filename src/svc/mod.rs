@@ -21,11 +21,40 @@ pub(crate) fn required_name(name: &str) -> Result<String> {
     Ok(trimmed.to_owned())
 }
 
+/// Optional free text with surrounding whitespace removed; blank becomes
+/// `None`, so an emptied form field clears the column instead of storing `""`.
+pub fn optional_text(value: Option<String>) -> Option<String> {
+    value.and_then(|text| {
+        let trimmed = text.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    })
+}
+
 /// `"1 entity"` / `"3 entities"`, for user-facing refusal messages.
 pub(crate) fn entity_count_phrase(n: i64) -> String {
     if n == 1 {
         "1 entity".to_owned()
     } else {
         format!("{n} entities")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn optional_text_trims_and_drops_blanks() {
+        assert_eq!(optional_text(None), None);
+        assert_eq!(optional_text(Some(String::new())), None);
+        assert_eq!(optional_text(Some(" \t\n ".to_owned())), None);
+        assert_eq!(
+            optional_text(Some("  a note ".to_owned())).as_deref(),
+            Some("a note")
+        );
+        assert_eq!(
+            optional_text(Some("kept".to_owned())).as_deref(),
+            Some("kept")
+        );
     }
 }

@@ -11,7 +11,7 @@ use uuid::Uuid;
 use crate::db::{ITEM_TYPE_ID, LOCATION_TYPE_ID};
 use crate::models::EntityType;
 use crate::schema::{entities, entity_types};
-use crate::svc::{entity_count_phrase, required_name};
+use crate::svc::{entity_count_phrase, optional_text, required_name};
 
 /// The fields a caller supplies to create an entity type.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,8 +79,8 @@ pub fn create(conn: &mut SqliteConnection, input: NewEntityType) -> Result<Entit
     let row = EntityType {
         id: Uuid::now_v7().to_string(),
         name: required_name(&input.name)?,
-        description: input.description,
-        icon: input.icon,
+        description: optional_text(input.description),
+        icon: optional_text(input.icon),
         is_location: input.is_location,
         default_template_id: None,
         created_at: now,
@@ -116,8 +116,8 @@ pub fn update(
         diesel::update(entity_types::table.find(id))
             .set((
                 entity_types::name.eq(name),
-                entity_types::description.eq(changes.description),
-                entity_types::icon.eq(changes.icon),
+                entity_types::description.eq(optional_text(changes.description)),
+                entity_types::icon.eq(optional_text(changes.icon)),
                 entity_types::is_location.eq(changes.is_location),
                 entity_types::updated_at.eq(Utc::now().naive_utc()),
             ))
@@ -285,5 +285,29 @@ mod tests {
             assert!(err.to_string().contains("built-in"), "{err}");
             assert!(get(&mut conn, id).unwrap().is_some());
         }
+    }
+
+    #[test]
+    fn blank_optional_text_is_stored_as_none() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let blanks = NewEntityType {
+            description: Some("  ".to_owned()),
+            icon: Some(String::new()),
+            ..input("Shelf", true)
+        };
+        let created = create(&mut conn, blanks.clone()).unwrap();
+        assert_eq!((created.description, created.icon), (None, None));
+        let updated = update(
+            &mut conn,
+            &created.id,
+            NewEntityType {
+                icon: Some(" box ".to_owned()),
+                ..blanks
+            },
+        )
+        .unwrap();
+        assert_eq!(updated.description, None);
+        assert_eq!(updated.icon.as_deref(), Some("box"));
     }
 }
