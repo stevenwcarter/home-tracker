@@ -67,6 +67,22 @@ imported; the command prints one warning per category with the count. The
 command's output is a per-table count of rows inserted, updated, and
 skipped, plus any warnings.
 
+## Browsing
+
+The site opens on a home page with stat cards and root locations, then lets you
+drill in from there: a left sidebar tree (built client-side from the flat
+`locations` list, expand/collapse persisted in `localStorage`) links to a
+location page (breadcrumb, child locations, items with thumbnails) and an item
+page (large photo, details, tags). A header search box queries across items
+and locations by name.
+
+Every attachment is reachable at `GET /attachments/{id}` (the original) and
+`GET /attachments/{id}/thumb/{size}` (a thumbnail, generated on demand at
+300/500/1200px and cached in the `thumbnails` table thereafter). Both URLs
+carry `?v=<sha256 prefix>`, so they can be cached by the browser forever and
+still pick up new bytes after a re-import; each response also sets a matching
+`ETag`.
+
 ## Project layout
 
 ```

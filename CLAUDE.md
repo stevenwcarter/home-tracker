@@ -55,10 +55,10 @@ Single Rust crate at the repo root with an embedded, Vite-built React frontend. 
 - `money.rs`: `Cents`, money as integer minor units
 - `kinds.rs`: closed string enums (`AttachmentKind`, `FieldKind`) stored as lowercase TEXT
 - `models/`: one file per table, Diesel `Queryable`/`Selectable` structs
-- `svc/`: business logic, one file per aggregate (`entity.rs`, `entity_type.rs`, `entity_field.rs`, `tag.rs`, `attachment.rs`, `settings.rs`, `stats.rs`); `fixtures.rs` is test support (the shared sample inventory)
+- `svc/`: business logic, one file per aggregate (`entity.rs`, `entity_type.rs`, `entity_field.rs`, `tag.rs`, `attachment.rs`, `settings.rs`, `stats.rs`, `thumbnail.rs` sizes/MIME gate, `thumbnail_service.rs` generate-or-cache); `fixtures.rs` is test support (the shared sample inventory)
 - `graphql/`: juniper: `context.rs` (`GraphQLContext`, `Actor`, `Role`), `schema.rs` (`RootNode`), `query.rs`, `objects/` (one file per GraphQL type)
 - `import/`: Homebox backup importer: `source.rs` (zip or directory), `tables.rs` (row structs), `run.rs` (upsert), `report.rs`
-- `api/`: axum handlers: `graphql.rs` (`/graphql` is POST only; there is no auth in v1, so a GET-triggered mutation would be a LAN CSRF path; `/graphiql` in debug builds)
+- `api/`: axum handlers: `graphql.rs` (`/graphql` is POST only; there is no auth in v1, so a GET-triggered mutation would be a LAN CSRF path; `/graphiql` in debug builds), `attachments.rs` (`/attachments/{id}` and its `/thumb/{size}`)
 - `routes.rs`: router, compression, embedded SPA, `/assets` immutable cache
 - `healthcheck.rs`: liveness probe used by the Docker `HEALTHCHECK`
 
@@ -66,11 +66,11 @@ Single Rust crate at the repo root with an embedded, Vite-built React frontend. 
 
 - `App.tsx` / `main.tsx`: Apollo Client setup, router, lazy-loaded pages
 - `theme/`: `tokens.css`, `ThemeProvider`, `useTheme`
-- `hooks/`: one hook per GraphQL operation (Apollo `useQuery`/`useMutation`), `queries.ts`
-- `components/`: reusable UI (`AppHeader`, `Sidebar`, `StatCard`)
-- `page/`: page-level components (`PageTemplate`, `HomePage`)
+- `hooks/`: one hook per GraphQL operation (`useSummary`, `useLocations`, `useEntity`, `useSearch`, `useRootItems`), `queries.ts`
+- `components/`: reusable UI (`AppHeader`, `Sidebar`, `LocationTree`, `Breadcrumbs`, `LocationCards`, `EntityList`, `Thumb`, `SearchBox`, `StatCard`, `DetailsGrid`, `TagChips`)
+- `page/`: page-level components (`PageTemplate`, `HomePage`, `LocationPage`, `ItemPage`, `SearchPage`, `NotFound`)
 - `types/`: hand-written TypeScript interfaces mirroring the GraphQL schema
-- `utils/`: small pure helpers (`currency.ts`)
+- `utils/`: small pure helpers (`currency.ts`, `date.ts`, `locationTree.ts` builds the sidebar tree from flat `locations`, `thumbUrl.ts`)
 
 ## Key Conventions
 
@@ -107,3 +107,7 @@ Never a raw palette class like `bg-zinc-900`. A theme is exactly one block of `-
 **`svc` reads that return whole rows use `Selectable` models via `as_select()`; scalar reads (`settings::currency`, the `stats` aggregates) select columns directly.** Selecting a model's own columns this way rather than listing them by hand means adding a column to a model cannot silently desync a query.
 
 **SQLite `LIKE`/`lower()` fold case for ASCII only; non-ASCII names sort and match case-sensitively (known limitation).**
+
+**Attachment URLs carry `?v=<sha256 prefix>`** so they can be cached forever by the browser and still change after a re-import; `is_thumbnailable` (`svc/thumbnail.rs`) is the single MIME gate other code should call rather than re-checking MIME types.
+
+**The location tree is built client-side.** `useLocations` fetches the flat `locations` query and `utils/locationTree.ts` assembles it into a `LocationNode` tree; there is no server-side tree query.

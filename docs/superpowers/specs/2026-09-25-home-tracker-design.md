@@ -360,6 +360,11 @@ Validation rules enforced in `svc`, tested at the GraphQL seam:
 | POST | `/api/upload/{entityId}` | Multipart photo upload (phase 5). Field `file`, optional `primary=true`. Returns the `Attachment` as JSON. |
 | GET | `/*` | Embedded SPA. Unknown paths fall back to `index.html`. |
 
+Both `url` and `thumbnailUrl` carry `?v=<sha256 prefix>`, the first 12 hex
+characters of the attachment's sha256, so the SPA can cache a URL forever and
+still see new bytes after a re-import. The ETag is `"<sha256>"` on the
+original and `"<sha256>-<size>"` on a thumbnail.
+
 A healthcheck needs no route: the `healthcheck` subcommand connects to
 `127.0.0.1:$PORT`, sends `GET / HTTP/1.0`, reads one byte, exits 0/1.
 
@@ -474,10 +479,10 @@ so a theme is a block of variables. `ThemeProvider` sets `data-theme` on
 `{theme, setTheme}`. `index.css` restores `cursor: pointer` on buttons exactly as
 chore-tracker does.
 
-**Hooks.** One hook per operation, named after it: `useSummary`, `useLocationTree`,
+**Hooks.** One hook per operation, named after it: `useSummary`, `useLocations`,
 `useEntity`, `useEntityTypes`, `useTags`, `useSearch`, `useCreateEntity`,
 `useUpdateEntity`, `useDeleteEntity`, `useUploadPhoto` (fetch, not Apollo).
-Mutations refetch the queries they invalidate (`locationTree`, `entity`,
+Mutations refetch the queries they invalidate (`locations`, `entity`,
 `summary`). Every hook has a vitest test using Apollo's `MockedProvider`.
 
 **Thumbnails in the UI.** A `<Thumb attachment size>` component builds the URL
