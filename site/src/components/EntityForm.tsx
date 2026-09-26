@@ -65,7 +65,12 @@ function moneyError(text: string): string | null {
   }
 }
 
-const WHOLE_NUMBER = /^\d{1,9}$/;
+/** Quantity is a float in the API (imports carry values like 1.5); only negatives are refused. */
+function parseQuantity(text: string): number | null {
+  if (text.trim() === '') return null;
+  const quantity = Number(text);
+  return Number.isFinite(quantity) && quantity >= 0 ? quantity : null;
+}
 
 /** A blank control means "none": the API takes null, not an empty string. */
 const optional = (text: string): string | null => (text === '' ? null : text);
@@ -158,7 +163,8 @@ export const EntityForm = (props: EntityFormProps) => {
 
   const nameBlank = input.name.trim() === '';
   const nameError = nameTouched && nameBlank ? 'Enter a name' : null;
-  const quantityError = WHOLE_NUMBER.test(quantityText) ? null : 'Enter a whole number, 0 or more';
+  const quantity = parseQuantity(quantityText);
+  const quantityError = quantity === null ? 'Enter a number, 0 or more' : null;
   const moneyErrors: Record<MoneyKey, string | null> = {
     purchasePriceCents: moneyError(money.purchasePriceCents),
     soldPriceCents: moneyError(money.soldPriceCents),
@@ -175,7 +181,7 @@ export const EntityForm = (props: EntityFormProps) => {
     onSubmit({
       ...input,
       name: input.name.trim(),
-      quantity: Number(quantityText),
+      quantity: quantity ?? input.quantity,
       purchasePriceCents: parseMoney(money.purchasePriceCents),
       soldPriceCents: parseMoney(money.soldPriceCents),
     });
@@ -289,8 +295,8 @@ export const EntityForm = (props: EntityFormProps) => {
               {...control}
               type="number"
               min={0}
-              step={1}
-              inputMode="numeric"
+              step="any"
+              inputMode="decimal"
               value={quantityText}
               onChange={(event) => setQuantityText(event.target.value)}
               className={INPUT_CLASS}

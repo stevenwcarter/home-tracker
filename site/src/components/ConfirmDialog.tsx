@@ -46,9 +46,11 @@ export const ConfirmDialog = ({
         onCancelRef.current();
       }
     };
-    document.addEventListener('keydown', onKeyDown);
+    // Capture phase, so this runs before bubble-phase Escape handlers (the
+    // drawer's), which skip the event once it is marked handled here.
+    document.addEventListener('keydown', onKeyDown, { capture: true });
     return () => {
-      document.removeEventListener('keydown', onKeyDown);
+      document.removeEventListener('keydown', onKeyDown, { capture: true });
       opener?.focus();
     };
   }, [open]);

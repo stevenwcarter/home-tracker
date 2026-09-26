@@ -158,14 +158,17 @@ describe('EntityForm', () => {
     });
   });
 
-  it('flags a blank or fractional quantity inline and blocks Save', async () => {
+  it.each(['', '-1'])('flags quantity %j inline and blocks Save', async (text) => {
     renderForm({ mode: 'edit', initial: drill });
     await loaded();
     const quantity = screen.getByLabelText('Quantity');
     await userEvent.clear(quantity);
-    expect(quantity).toHaveAccessibleDescription('Enter a whole number, 0 or more');
+    if (text) await userEvent.type(quantity, text);
+    expect(quantity).toHaveAccessibleDescription('Enter a number, 0 or more');
     expect(save()).toBeDisabled();
-    await userEvent.type(quantity, '3');
+    await userEvent.clear(quantity);
+    await userEvent.type(quantity, '2.25');
+    expect(quantity).not.toHaveAttribute('aria-invalid', 'true');
     expect(save()).toBeEnabled();
   });
 
@@ -240,6 +243,34 @@ describe('EntityForm', () => {
       await userEvent.click(save());
       expect(onSubmit).toHaveBeenCalledTimes(1);
       expect(onSubmit).toHaveBeenCalledWith({ ...DRILL_INPUT, name: 'Hammer drill' });
+    });
+
+    it('round-trips a fractional quantity when only the name changes', async () => {
+      const bolts = entityDetail({ ...drill, quantity: 1.5 });
+      const { onSubmit } = renderForm({ mode: 'edit', initial: bolts });
+      await loaded();
+      expect(save()).toBeEnabled();
+      const name = screen.getByLabelText('Name');
+      await userEvent.clear(name);
+      await userEvent.type(name, 'Bolts');
+      await userEvent.click(save());
+      expect(onSubmit).toHaveBeenCalledWith({ ...DRILL_INPUT, name: 'Bolts', quantity: 1.5 });
+    });
+
+    it('round-trips a parent that is an item, not a location', async () => {
+      const bit = entityDetail({ ...drill, parentId: 'toolbox', parent: null });
+      const { onSubmit } = renderForm({ mode: 'edit', initial: bit });
+      await loaded();
+      expect(screen.getByLabelText('Parent location')).toHaveValue('toolbox');
+      const name = screen.getByLabelText('Name');
+      await userEvent.clear(name);
+      await userEvent.type(name, 'Drill bit');
+      await userEvent.click(save());
+      expect(onSubmit).toHaveBeenCalledWith({
+        ...DRILL_INPUT,
+        name: 'Drill bit',
+        parentId: 'toolbox',
+      });
     });
 
     it('sends null for a cleared optional field and the full tag set', async () => {

@@ -11,7 +11,8 @@ export const PageTemplate = () => {
   useEffect(() => {
     if (!drawerOpen) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
+      // A dialog open over the drawer handles its own Escape and marks it handled.
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
       setDrawerOpen(false);
       hamburgerRef.current?.focus();
     };
