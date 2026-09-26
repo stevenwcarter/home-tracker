@@ -1,5 +1,6 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
+import { useQuery } from '@apollo/client/react';
 import { MockedProvider } from '@apollo/client/testing/react';
 import type { MockedResponse } from '@apollo/client/testing';
 import React from 'react';
@@ -9,6 +10,9 @@ import { GET_SUMMARY } from '../queries';
 import { SUMMARY } from 'test/entityFixtures';
 
 vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
+import { toast } from 'react-toastify';
+
+beforeEach(() => vi.clearAllMocks());
 
 const wrapper =
   (mocks: MockedResponse[]) =>
@@ -36,5 +40,17 @@ describe('useCurrency', () => {
     });
     await waitFor(() => expect(result.current.summary.error).toBeDefined());
     expect(result.current.currency).toBe('USD');
+  });
+
+  it('never toasts, even when the summary fails to load', async () => {
+    const mocks = [{ request: { query: GET_SUMMARY }, error: new Error('boom') }];
+    // A raw (non-toasting) probe on the same query shows when the failure has landed.
+    const { result } = renderHook(
+      () => ({ currency: useCurrency(), probe: useQuery(GET_SUMMARY) }),
+      { wrapper: wrapper(mocks) },
+    );
+    await waitFor(() => expect(result.current.probe.error).toBeDefined());
+    expect(result.current.currency).toBe('USD');
+    expect(toast.error).not.toHaveBeenCalled();
   });
 });

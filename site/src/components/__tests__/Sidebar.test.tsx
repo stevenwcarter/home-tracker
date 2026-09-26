@@ -4,7 +4,9 @@ import userEvent from '@testing-library/user-event';
 import { MockedProvider } from '@apollo/client/testing/react';
 import { MemoryRouter } from 'react-router-dom';
 import { Sidebar, EXPANDED_STORAGE_KEY } from '../Sidebar';
-import { GET_LOCATIONS } from 'hooks/queries';
+import type { MockedResponse } from '@apollo/client/testing';
+import { GET_ENTITY, GET_LOCATIONS } from 'hooks/queries';
+import { entityDetail } from 'test/entityFixtures';
 
 const locations = [
   { __typename: 'Entity', id: 'house', name: 'House', parentId: null, archived: false },
@@ -12,11 +14,14 @@ const locations = [
   { __typename: 'Entity', id: 'shelf', name: 'Shelf', parentId: 'garage', archived: false },
 ];
 
-const renderSidebar = (path = '/') =>
+const LOCATIONS_MOCK: MockedResponse = {
+  request: { query: GET_LOCATIONS },
+  result: { data: { locations } },
+};
+
+const renderSidebar = (path = '/', mocks: MockedResponse[] = [LOCATIONS_MOCK]) =>
   render(
-    <MockedProvider
-      mocks={[{ request: { query: GET_LOCATIONS }, result: { data: { locations } } }]}
-    >
+    <MockedProvider mocks={mocks}>
       <MemoryRouter initialEntries={[path]}>
         <Sidebar drawerOpen={false} onClose={() => {}} />
       </MemoryRouter>
@@ -65,5 +70,25 @@ describe('Sidebar', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Collapse House' }));
     expect(screen.queryByRole('link', { name: 'Garage' })).not.toBeInTheDocument();
     expect(storedExpanded()).toEqual([]);
+  });
+
+  it("highlights an item's parent location on /items/:id", async () => {
+    const drill = entityDetail({ id: 'drill', name: 'Drill', parentId: 'shelf' });
+    renderSidebar('/items/drill', [
+      LOCATIONS_MOCK,
+      {
+        request: { query: GET_ENTITY, variables: { id: 'drill' } },
+        result: { data: { entity: drill } },
+      },
+    ]);
+    const shelf = await screen.findByRole('link', { name: 'Shelf' });
+    expect(shelf).toHaveAttribute('aria-current', 'page');
+    expect(screen.getByRole('button', { name: 'Collapse Garage' })).toBeInTheDocument();
+  });
+
+  it('shows an error line, not the empty state, when locations fail to load', async () => {
+    renderSidebar('/', [{ request: { query: GET_LOCATIONS }, error: new Error('boom') }]);
+    expect(await screen.findByText('Could not load locations.')).toHaveClass('text-danger');
+    expect(screen.queryByText('No locations yet.')).not.toBeInTheDocument();
   });
 });

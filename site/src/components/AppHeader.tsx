@@ -1,3 +1,4 @@
+import { Ref } from 'react';
 import { Link } from 'react-router-dom';
 import { SearchBox } from 'components/SearchBox';
 import { useTheme } from 'theme/useTheme';
@@ -6,14 +7,17 @@ interface AppHeaderProps {
   /** Whether the (below-`md`) locations drawer is open. */
   drawerOpen: boolean;
   onOpenDrawer: () => void;
+  /** The hamburger button, so closing the drawer can hand focus back to it. */
+  hamburgerRef?: Ref<HTMLButtonElement>;
 }
 
-export const AppHeader = ({ drawerOpen, onOpenDrawer }: AppHeaderProps) => {
+export const AppHeader = ({ drawerOpen, onOpenDrawer, hamburgerRef }: AppHeaderProps) => {
   const { theme, toggle } = useTheme();
   return (
     <header className="border-b border-border bg-surface">
       <div className="flex h-14 items-center gap-3 px-4">
         <button
+          ref={hamburgerRef}
           type="button"
           onClick={onOpenDrawer}
           aria-label="Open locations"

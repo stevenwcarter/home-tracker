@@ -43,92 +43,100 @@ const ENTITY_LIST_ITEM_FIELDS = gql`
   }
 `;
 
+/** Every field of an entity's detail page; also what entity mutations return. */
+const ENTITY_DETAIL_FIELDS = gql`
+  fragment EntityDetailFields on Entity {
+    id
+    name
+    description
+    entityType {
+      id
+      name
+      isLocation
+    }
+    isLocation
+    parent {
+      id
+      name
+      parentId
+      archived
+    }
+    parentId
+    ancestors {
+      id
+      name
+      parentId
+      archived
+    }
+    childLocations {
+      ...EntityListItemFields
+    }
+    items {
+      ...EntityListItemFields
+    }
+    archived
+    assetId
+    quantity
+    insured
+    serialNumber
+    modelNumber
+    manufacturer
+    notes
+    lifetimeWarranty
+    warrantyExpires
+    warrantyDetails
+    purchaseDate
+    purchaseFrom
+    purchasePriceCents
+    soldDate
+    soldTo
+    soldPriceCents
+    soldNotes
+    tags {
+      id
+      name
+      color
+    }
+    attachments {
+      id
+      kind
+      primary
+      title
+      mimeType
+      url
+      thumbnailUrl
+    }
+    primaryPhoto {
+      id
+      kind
+      primary
+      title
+      mimeType
+      url
+      thumbnailUrl
+    }
+    fields {
+      id
+      name
+      kind
+      textValue
+      numberValue
+      booleanValue
+      timeValue
+    }
+    createdAt
+    updatedAt
+  }
+  ${ENTITY_LIST_ITEM_FIELDS}
+`;
+
 export const GET_ENTITY = gql`
   query GetEntity($id: ID!) {
     entity(id: $id) {
-      id
-      name
-      description
-      entityType {
-        id
-        name
-        isLocation
-      }
-      isLocation
-      parent {
-        id
-        name
-        parentId
-        archived
-      }
-      parentId
-      ancestors {
-        id
-        name
-        parentId
-        archived
-      }
-      childLocations {
-        ...EntityListItemFields
-      }
-      items {
-        ...EntityListItemFields
-      }
-      archived
-      assetId
-      quantity
-      insured
-      serialNumber
-      modelNumber
-      manufacturer
-      notes
-      lifetimeWarranty
-      warrantyExpires
-      warrantyDetails
-      purchaseDate
-      purchaseFrom
-      purchasePriceCents
-      soldDate
-      soldTo
-      soldPriceCents
-      soldNotes
-      tags {
-        id
-        name
-        color
-      }
-      attachments {
-        id
-        kind
-        primary
-        title
-        mimeType
-        url
-        thumbnailUrl
-      }
-      primaryPhoto {
-        id
-        kind
-        primary
-        title
-        mimeType
-        url
-        thumbnailUrl
-      }
-      fields {
-        id
-        name
-        kind
-        textValue
-        numberValue
-        booleanValue
-        timeValue
-      }
-      createdAt
-      updatedAt
+      ...EntityDetailFields
     }
   }
-  ${ENTITY_LIST_ITEM_FIELDS}
+  ${ENTITY_DETAIL_FIELDS}
 `;
 
 export const SEARCH = gql`
@@ -147,4 +155,136 @@ export const GET_ROOT_ITEMS = gql`
     }
   }
   ${ENTITY_LIST_ITEM_FIELDS}
+`;
+
+const ENTITY_TYPE_FIELDS = gql`
+  fragment EntityTypeFields on EntityType {
+    id
+    name
+    description
+    icon
+    isLocation
+    entityCount
+  }
+`;
+
+// `Tag` exposes its parent as an object, not a `parentId` scalar; `useTags`
+// flattens it.
+const TAG_FIELDS = gql`
+  fragment TagFields on Tag {
+    id
+    name
+    description
+    color
+    icon
+    parent {
+      id
+    }
+    entityCount
+  }
+`;
+
+export const GET_ENTITY_TYPES = gql`
+  query GetEntityTypes {
+    entityTypes {
+      ...EntityTypeFields
+    }
+  }
+  ${ENTITY_TYPE_FIELDS}
+`;
+
+export const GET_TAGS = gql`
+  query GetTags {
+    tags {
+      ...TagFields
+    }
+  }
+  ${TAG_FIELDS}
+`;
+
+export const CREATE_ENTITY = gql`
+  mutation CreateEntity($input: EntityInput!) {
+    createEntity(input: $input) {
+      ...EntityDetailFields
+    }
+  }
+  ${ENTITY_DETAIL_FIELDS}
+`;
+
+export const UPDATE_ENTITY = gql`
+  mutation UpdateEntity($id: ID!, $input: EntityInput!) {
+    updateEntity(id: $id, input: $input) {
+      ...EntityDetailFields
+    }
+  }
+  ${ENTITY_DETAIL_FIELDS}
+`;
+
+export const DELETE_ENTITY = gql`
+  mutation DeleteEntity($id: ID!) {
+    deleteEntity(id: $id)
+  }
+`;
+
+export const CREATE_ENTITY_TYPE = gql`
+  mutation CreateEntityType($input: EntityTypeInput!) {
+    createEntityType(input: $input) {
+      ...EntityTypeFields
+    }
+  }
+  ${ENTITY_TYPE_FIELDS}
+`;
+
+export const UPDATE_ENTITY_TYPE = gql`
+  mutation UpdateEntityType($id: ID!, $input: EntityTypeInput!) {
+    updateEntityType(id: $id, input: $input) {
+      ...EntityTypeFields
+    }
+  }
+  ${ENTITY_TYPE_FIELDS}
+`;
+
+export const DELETE_ENTITY_TYPE = gql`
+  mutation DeleteEntityType($id: ID!) {
+    deleteEntityType(id: $id)
+  }
+`;
+
+export const CREATE_TAG = gql`
+  mutation CreateTag($input: TagInput!) {
+    createTag(input: $input) {
+      ...TagFields
+    }
+  }
+  ${TAG_FIELDS}
+`;
+
+export const UPDATE_TAG = gql`
+  mutation UpdateTag($id: ID!, $input: TagInput!) {
+    updateTag(id: $id, input: $input) {
+      ...TagFields
+    }
+  }
+  ${TAG_FIELDS}
+`;
+
+export const DELETE_TAG = gql`
+  mutation DeleteTag($id: ID!) {
+    deleteTag(id: $id)
+  }
+`;
+
+export const DELETE_ATTACHMENT = gql`
+  mutation DeleteAttachment($id: ID!) {
+    deleteAttachment(id: $id)
+  }
+`;
+
+export const SET_PRIMARY_PHOTO = gql`
+  mutation SetPrimaryPhoto($attachmentId: ID!) {
+    setPrimaryPhoto(attachmentId: $attachmentId) {
+      ...EntityDetailFields
+    }
+  }
+  ${ENTITY_DETAIL_FIELDS}
 `;

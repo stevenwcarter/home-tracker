@@ -45,6 +45,29 @@ describe('PageTemplate drawer', () => {
     expect(hamburger).toHaveAttribute('aria-expanded', 'false');
   });
 
+  it('closes on Escape and returns focus to the hamburger', async () => {
+    renderPage();
+    await screen.findByRole('link', { name: 'House' });
+    const hamburger = screen.getByRole('button', { name: 'Open locations' });
+    await userEvent.click(hamburger);
+    screen.getByRole('link', { name: 'House' }).focus();
+    expect(hamburger).not.toHaveFocus();
+
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByRole('button', { name: 'Close locations' })).not.toBeInTheDocument();
+    expect(hamburger).toHaveAttribute('aria-expanded', 'false');
+    expect(hamburger).toHaveFocus();
+  });
+
+  it('ignores Escape while the drawer is closed', async () => {
+    renderPage();
+    await screen.findByRole('link', { name: 'House' });
+    const search = screen.getByLabelText('Search items');
+    search.focus();
+    await userEvent.keyboard('{Escape}');
+    expect(search).toHaveFocus();
+  });
+
   it('closes the drawer on navigation', async () => {
     renderPage();
     await userEvent.click(screen.getByRole('button', { name: 'Open locations' }));

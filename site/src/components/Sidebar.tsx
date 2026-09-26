@@ -1,14 +1,12 @@
 import clsx from 'clsx';
 import { useEffect, useState } from 'react';
-import { useLocation } from 'react-router-dom';
 import { LocationTree } from 'components/LocationTree';
+import { useCurrentLocationId } from 'hooks/useCurrentLocationId';
 import { useLocations } from 'hooks/useLocations';
 import { pathTo } from 'utils/locationTree';
 
 /** localStorage key holding the tree's expanded location ids as a JSON array. */
 export const EXPANDED_STORAGE_KEY = 'home-tracker.tree.expanded';
-
-const LOCATION_PATH = /^\/locations\/([^/]+)/;
 
 /** Reads the stored expanded set, tolerating missing, corrupt, or throwing storage. */
 function readStoredExpanded(): Set<string> {
@@ -37,9 +35,8 @@ interface SidebarProps {
 }
 
 export const Sidebar = ({ drawerOpen, onClose }: SidebarProps) => {
-  const { tree, loading } = useLocations();
-  const { pathname } = useLocation();
-  const currentId = LOCATION_PATH.exec(pathname)?.[1] ?? null;
+  const { tree, loading, error } = useLocations();
+  const currentId = useCurrentLocationId();
 
   const [expanded, setExpanded] = useState<Set<string>>(readStoredExpanded);
 
@@ -96,6 +93,8 @@ export const Sidebar = ({ drawerOpen, onClose }: SidebarProps) => {
               onToggle={toggle}
               onNavigate={onClose}
             />
+          ) : error ? (
+            <p className="text-sm text-danger">Could not load locations.</p>
           ) : (
             <p className="text-sm text-muted">{loading ? 'Loading…' : 'No locations yet.'}</p>
           )}

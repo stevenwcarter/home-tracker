@@ -73,6 +73,11 @@ const fieldValue = (field: EntityFieldRef): string | null => {
       return field.booleanValue ? 'Yes' : 'No';
     case 'TIME':
       return field.timeValue && formatDateTime(field.timeValue);
+    default: {
+      // A new backend kind must be handled above before this compiles.
+      const exhaustive: never = field.kind;
+      return exhaustive;
+    }
   }
 };
 

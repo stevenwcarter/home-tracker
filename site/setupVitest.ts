@@ -60,8 +60,11 @@ fetchMocker.enableMocks();
 
 // Default answer for every GraphQL operation, keyed by operation name, so
 // App-level tests can render without an Apollo mock of their own. Only
-// `summary` carries data worth asserting on; the rest are the empty shape a
-// fresh install would show.
+// `summary` carries data worth asserting on; the queries return the empty
+// shape a fresh install would show and the deletes succeed. Creates, updates
+// and `SetPrimaryPhoto` have no sensible default record, so they (and any
+// unknown operation) answer with a GraphQL error naming the operation: a test
+// that exercises one must supply its own mock.
 const DEFAULT_GRAPHQL_DATA: Record<string, unknown> = {
   GetSummary: {
     summary: {
@@ -76,14 +79,24 @@ const DEFAULT_GRAPHQL_DATA: Record<string, unknown> = {
   GetRootItems: { rootItems: [] },
   GetEntity: { entity: null },
   Search: { search: [] },
+  GetEntityTypes: { entityTypes: [] },
+  GetTags: { tags: [] },
+  DeleteEntity: { deleteEntity: true },
+  DeleteEntityType: { deleteEntityType: true },
+  DeleteTag: { deleteTag: true },
+  DeleteAttachment: { deleteAttachment: true },
 };
 
 beforeEach(() => {
   fetchMocker.resetMocks();
   fetchMocker.mockIf(/\/graphql$/, async (request) => {
     const { operationName } = await request.json();
+    const body =
+      operationName in DEFAULT_GRAPHQL_DATA
+        ? { data: DEFAULT_GRAPHQL_DATA[operationName] }
+        : { errors: [{ message: `No default mock for ${operationName}` }] };
     return {
-      body: JSON.stringify({ data: DEFAULT_GRAPHQL_DATA[operationName] ?? null }),
+      body: JSON.stringify(body),
       headers: { 'content-type': 'application/json' },
     };
   });

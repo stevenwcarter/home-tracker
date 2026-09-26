@@ -9,7 +9,7 @@ interface EntityResponse {
 
 export const useEntity = (id: string) => {
   const { data, loading, error } = useQuery<EntityResponse>(GET_ENTITY, { variables: { id } });
-  useErrorToast(error, 'Error loading item');
+  useErrorToast(error, 'Error loading');
   const entity = data?.entity ?? null;
   const notFound = !loading && !error && data !== undefined && data.entity === null;
   return { entity, loading, error, notFound };

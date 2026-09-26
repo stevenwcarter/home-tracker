@@ -2,19 +2,18 @@ import { EntityList } from 'components/EntityList';
 import { LocationCards } from 'components/LocationCards';
 import { Section } from 'components/Section';
 import { StatCard } from 'components/StatCard';
+import { useCurrency } from 'hooks/useCurrency';
 import { useLocations } from 'hooks/useLocations';
 import { useRootItems } from 'hooks/useRootItems';
 import { useSummary } from 'hooks/useSummary';
 import { formatCents } from 'utils/currency';
-
-const DEFAULT_CURRENCY = 'USD';
 
 export const HomePage = () => {
   const { summary, loading } = useSummary();
   const { tree, loading: locationsLoading } = useLocations();
   const { items: rootItems, loading: rootItemsLoading } = useRootItems();
   const hasError = !loading && !summary;
-  const currency = summary?.currency ?? DEFAULT_CURRENCY;
+  const currency = useCurrency();
   return (
     <section>
       <h1>Home</h1>

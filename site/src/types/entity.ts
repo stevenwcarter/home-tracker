@@ -5,10 +5,27 @@ export interface EntityTypeRef {
   isLocation: boolean;
 }
 
+/** An entity type as the types page and pickers list it. */
+export interface EntityTypeDetail extends EntityTypeRef {
+  description: string | null;
+  icon: string | null;
+  /** How many entities have this type. */
+  entityCount: number;
+}
+
 export interface TagRef {
   id: string;
   name: string;
   color: string | null;
+}
+
+/** A tag as the tags page and pickers list it. */
+export interface TagDetail extends TagRef {
+  description: string | null;
+  icon: string | null;
+  parentId: string | null;
+  /** How many entities carry this tag. */
+  entityCount: number;
 }
 
 export type AttachmentKind = 'PHOTO' | 'MANUAL' | 'WARRANTY' | 'ATTACHMENT' | 'RECEIPT';
@@ -93,4 +110,54 @@ export interface EntityDetail {
   fields: EntityFieldRef[];
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Every editable field of an entity, as `createEntity`/`updateEntity` take it.
+ * An update replaces every field (an omitted optional resets to its default),
+ * so every key is required here: build it from the loaded entity with
+ * `toEntityInput` rather than sending only the changed fields. Money is in
+ * cents; dates are `YYYY-MM-DD`.
+ */
+export interface EntityInput {
+  name: string;
+  description: string | null;
+  entityTypeId: string;
+  parentId: string | null;
+  archived: boolean;
+  quantity: number;
+  insured: boolean;
+  serialNumber: string | null;
+  modelNumber: string | null;
+  manufacturer: string | null;
+  notes: string | null;
+  lifetimeWarranty: boolean;
+  warrantyExpires: string | null;
+  warrantyDetails: string | null;
+  purchaseDate: string | null;
+  purchaseFrom: string | null;
+  purchasePriceCents: number;
+  soldDate: string | null;
+  soldTo: string | null;
+  soldPriceCents: number;
+  soldNotes: string | null;
+  /** The full tag set; replaces the entity's tags. */
+  tagIds: string[];
+}
+
+/** Every editable field of an entity type; an update replaces them all. */
+export interface EntityTypeInput {
+  name: string;
+  description: string | null;
+  icon: string | null;
+  isLocation: boolean;
+}
+
+/** Every editable field of a tag; an update replaces them all (a null parent makes it top-level). */
+export interface TagInput {
+  name: string;
+  description: string | null;
+  color: string | null;
+  icon: string | null;
+  parentId: string | null;
 }

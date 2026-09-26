@@ -3,7 +3,7 @@ import { screen, within } from '@testing-library/react';
 import { GET_ENTITY, GET_SUMMARY } from 'hooks/queries';
 import { entityDetail, listItem, locationSummary, SUMMARY } from 'test/entityFixtures';
 import { renderRoute } from 'test/renderRoute';
-import { AttachmentRef } from 'types/entity';
+import { AttachmentKind, AttachmentRef, EntityFieldRef, FieldKind } from 'types/entity';
 
 vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
 import { toast } from 'react-toastify';
@@ -74,6 +74,51 @@ const drill = entityDetail({
 });
 
 describe('ItemPage', () => {
+  it('renders a value for every FieldKind and every AttachmentKind', async () => {
+    const field = (kind: FieldKind, values: Partial<EntityFieldRef>) =>
+      ({
+        __typename: 'EntityField',
+        id: `f-${kind}`,
+        name: `Field ${kind}`,
+        kind,
+        textValue: null,
+        numberValue: null,
+        booleanValue: false,
+        timeValue: null,
+        ...values,
+      }) as EntityFieldRef;
+    const nonPhotoKinds: AttachmentKind[] = ['MANUAL', 'WARRANTY', 'ATTACHMENT', 'RECEIPT'];
+    const everyKind = entityDetail({
+      id: 'drill',
+      name: 'Drill',
+      fields: [
+        field('TEXT', { textValue: '18V' }),
+        field('NUMBER', { numberValue: 7 }),
+        field('BOOLEAN', { booleanValue: true }),
+        field('TIME', { timeValue: '2026-03-04T12:00:00Z' }),
+      ],
+      attachments: [
+        photo,
+        ...nonPhotoKinds.map((kind) =>
+          attachment({ id: kind, kind, title: `${kind} file`, thumbnailUrl: null }),
+        ),
+      ],
+      primaryPhoto: photo,
+    });
+    renderRoute('/items/drill', [entityMock('drill', everyKind), summaryMock]);
+    const fields = await screen.findByRole('region', { name: 'Custom fields' });
+    const valueOf = (label: string) => within(fields).getByText(label).nextElementSibling;
+    expect(valueOf('Field TEXT')).toHaveTextContent('18V');
+    expect(valueOf('Field NUMBER')).toHaveTextContent('7');
+    expect(valueOf('Field BOOLEAN')).toHaveTextContent('Yes');
+    expect(valueOf('Field TIME')).toHaveTextContent('Mar 4, 2026');
+    expect(screen.getByRole('img', { name: 'Front' })).toBeInTheDocument();
+    const attachments = screen.getByRole('region', { name: 'Attachments' });
+    for (const kind of nonPhotoKinds) {
+      expect(within(attachments).getByRole('link', { name: `${kind} file` })).toBeInTheDocument();
+    }
+  });
+
   it('shows breadcrumbs, heading and the large primary photo', async () => {
     renderRoute('/items/drill', [entityMock('drill', drill), summaryMock]);
     expect(screen.getByLabelText('Loading item')).toBeInTheDocument();

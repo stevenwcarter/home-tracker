@@ -1,15 +1,24 @@
 import { FormEvent, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 
 export const SearchBox = () => {
-  const [term, setTerm] = useState('');
+  // Seeded from `?q`, and re-seeded whenever `?q` changes (a new search,
+  // back/forward), so the box always shows the results page's query.
+  const [searchParams] = useSearchParams();
+  const query = searchParams.get('q') ?? '';
+  const [term, setTerm] = useState(query);
+  const [seededFrom, setSeededFrom] = useState(query);
+  if (query !== seededFrom) {
+    setSeededFrom(query);
+    setTerm(query);
+  }
   const navigate = useNavigate();
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    const query = term.trim();
-    if (!query) return;
-    navigate(`/search?q=${encodeURIComponent(query)}`);
+    const trimmed = term.trim();
+    if (!trimmed) return;
+    navigate(`/search?q=${encodeURIComponent(trimmed)}`);
   };
 
   return (

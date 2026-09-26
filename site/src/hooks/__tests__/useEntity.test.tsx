@@ -78,7 +78,7 @@ describe('useEntity', () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.entity).toBeNull();
     expect(result.current.notFound).toBe(false);
-    expect(toast.error).toHaveBeenCalledWith('Error loading item');
+    expect(toast.error).toHaveBeenCalledWith('Error loading');
   });
 
   it('sets notFound when the entity does not exist', async () => {
