@@ -9,6 +9,8 @@ use zip::ZipArchive;
 use zip::result::ZipError;
 
 const MANIFEST: &str = "manifest.json";
+/// The folder macOS Finder adds to every zip it makes, holding `._*` metadata.
+const MACOS_METADATA: &str = "__MACOSX";
 
 /// A Homebox backup's tables and attachment blobs, however they are stored.
 pub trait Source {
@@ -124,13 +126,16 @@ impl Source for ZipSource {
 }
 
 /// The folder every entry lives under when `manifest.json` is not at the root
-/// and all entries share one top-level directory; otherwise `""`.
+/// and all entries share one top-level directory; otherwise `""`. The
+/// `__MACOSX/` metadata folder macOS Finder adds to the zips it makes is not
+/// counted as a second top-level directory.
 fn entry_prefix(archive: &ZipArchive<File>) -> String {
     if archive.index_for_name(MANIFEST).is_some() {
         return String::new();
     }
     let mut tops = archive
         .file_names()
+        .filter(|n| n.split('/').next() != Some(MACOS_METADATA))
         .map(|n| n.split_once('/').map(|(top, _)| top));
     let Some(Some(first)) = tops.next() else {
         return String::new();

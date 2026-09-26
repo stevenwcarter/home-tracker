@@ -48,12 +48,14 @@ impl MiniBackup {
     }
 
     pub fn write_zip(path: &Path) -> MiniIds {
-        Self::write_zip_with_prefix(path, "")
+        Self::write_zip_with_prefix(path, "", false)
     }
 
     /// Like [`Self::write_zip`], but every entry lives under `prefix` (e.g.
     /// `"homebox-backup/"`), as when a user re-zips an exploded backup folder.
-    pub fn write_zip_with_prefix(path: &Path, prefix: &str) -> MiniIds {
+    /// With `macos_metadata`, the zip also holds the `__MACOSX/` resource-fork
+    /// entries macOS Finder adds when it compresses a folder.
+    pub fn write_zip_with_prefix(path: &Path, prefix: &str, macos_metadata: bool) -> MiniIds {
         let (ids, entries) = build();
         let mut zip = ZipWriter::new(File::create(path).unwrap());
         if !prefix.is_empty() {
@@ -64,6 +66,13 @@ impl MiniBackup {
             zip.start_file(format!("{prefix}{name}"), SimpleFileOptions::default())
                 .unwrap();
             zip.write_all(&bytes).unwrap();
+        }
+        if macos_metadata {
+            zip.add_directory("__MACOSX/", SimpleFileOptions::default())
+                .unwrap();
+            zip.start_file("__MACOSX/._manifest.json", SimpleFileOptions::default())
+                .unwrap();
+            zip.write_all(b"\0\x05\x16\x07 resource fork").unwrap();
         }
         zip.finish().unwrap();
         ids

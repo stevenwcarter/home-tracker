@@ -389,15 +389,17 @@ fn an_attachment_without_a_blob_is_skipped_with_a_warning() {
     );
 }
 
-/// Not part of the suite: writes the mini backup to the shared cargo target dir
-/// so it can be imported manually with `cargo run -- import <path>`. Run with
-/// `cargo test --test import -- --ignored write_mini_backup_to_target_dir`.
+/// Not part of the suite: writes the mini backup to `mini-backup/` under
+/// cargo's integration-test scratch dir (`$CARGO_TARGET_TMPDIR`, inside the
+/// target dir) so it can be imported manually with `cargo run -- import <path>`;
+/// the path is printed. Run with
+/// `cargo test --test import -- --ignored --nocapture write_mini_backup_to_target_dir`.
 #[test]
 #[ignore]
 fn write_mini_backup_to_target_dir() {
-    let dir = Path::new("/home/.build/cargo-target/mini-backup");
-    fs::create_dir_all(dir).unwrap();
-    MiniBackup::write_dir(dir);
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("mini-backup");
+    fs::create_dir_all(&dir).unwrap();
+    MiniBackup::write_dir(&dir);
     println!("wrote mini backup to {}", dir.display());
 }
 
@@ -505,10 +507,14 @@ fn zip_with_a_single_top_level_folder_is_accepted() {
     let plain = zips.path().join("plain.zip");
     MiniBackup::write_zip(&plain);
     let nested = zips.path().join("nested.zip");
-    MiniBackup::write_zip_with_prefix(&nested, "homebox-backup/");
+    MiniBackup::write_zip_with_prefix(&nested, "homebox-backup/", false);
+    // Finder's re-zip adds a second top-level folder that must not count.
+    let finder = zips.path().join("finder.zip");
+    MiniBackup::write_zip_with_prefix(&finder, "homebox-backup/", true);
     let plain_ids = import_zip(&plain);
     assert_eq!(plain_ids.len(), 4);
     assert_eq!(import_zip(&nested), plain_ids);
+    assert_eq!(import_zip(&finder), plain_ids);
 }
 
 /// Imports the mini backup, adds a 300px thumbnail next to Homebox's 500px one,
