@@ -25,6 +25,7 @@ const ROOT_FIELDS: Readonly<Record<string, string>> = {
   GetLocations: 'locations',
   GetEntityTypes: 'entityTypes',
   GetTags: 'tags',
+  GetAiSettings: 'aiSettings',
 };
 
 type EntityIds = ReadonlyArray<string | null | undefined>;

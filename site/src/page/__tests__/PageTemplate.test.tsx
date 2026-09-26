@@ -122,10 +122,10 @@ describe('PageTemplate drawer', () => {
 });
 
 // jsdom applies no media queries, so these pin the class-based layout that
-// keeps a 390px header usable: the Types/Tags nav leaves the header below
+// keeps a 390px header usable: the Types/Tags/Settings nav leaves the header below
 // `md` and the drawer carries it instead.
 describe('PageTemplate on a phone', () => {
-  it('hides the header nav below md and lists Types and Tags in the drawer', async () => {
+  it('hides the header nav below md and lists Types, Tags and Settings in the drawer', async () => {
     renderPage();
     await screen.findByRole('link', { name: 'House' });
     const header = screen.getByRole('banner');
@@ -141,6 +141,10 @@ describe('PageTemplate on a phone', () => {
       '/types',
     );
     expect(within(drawerNav).getByRole('link', { name: 'Tags' })).toHaveAttribute('href', '/tags');
+    expect(within(drawerNav).getByRole('link', { name: 'Settings' })).toHaveAttribute(
+      'href',
+      '/settings',
+    );
   });
 
   it('closes the drawer when a drawer page link is followed', async () => {

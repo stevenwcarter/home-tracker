@@ -288,3 +288,42 @@ export const SET_PRIMARY_PHOTO = gql`
   }
   ${ENTITY_DETAIL_FIELDS}
 `;
+
+const AI_SETTINGS_FIELDS = gql`
+  fragment AiSettingsFields on AiSettings {
+    baseUrl
+    visionModel
+    synthesisModel
+    extraInstructions
+    hasApiKey
+    fromEnvironment
+  }
+`;
+
+export const GET_AI_SETTINGS = gql`
+  query GetAiSettings {
+    aiSettings {
+      ...AiSettingsFields
+    }
+  }
+  ${AI_SETTINGS_FIELDS}
+`;
+
+export const UPDATE_AI_SETTINGS = gql`
+  mutation UpdateAiSettings($input: AiSettingsInput!) {
+    updateAiSettings(input: $input) {
+      ...AiSettingsFields
+    }
+  }
+  ${AI_SETTINGS_FIELDS}
+`;
+
+export const TEST_AI_CONNECTION = gql`
+  mutation TestAiConnection {
+    testAiConnection {
+      ok
+      message
+      latencyMs
+    }
+  }
+`;

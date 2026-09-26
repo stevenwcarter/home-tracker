@@ -7,7 +7,7 @@ import { toast } from 'react-toastify';
  */
 export async function toastOnFailure<T, F>(
   action: () => Promise<T>,
-  verb: 'save' | 'delete',
+  verb: 'save' | 'delete' | 'test the connection',
   fallback: F,
 ): Promise<T | F> {
   try {

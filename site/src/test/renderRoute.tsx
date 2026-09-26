@@ -1,7 +1,7 @@
 import { render } from '@testing-library/react';
 import { MockedProvider } from '@apollo/client/testing/react';
 import type { MockedResponse } from '@apollo/client/testing';
-import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { MemoryRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { CurrentPath } from './CurrentPath';
 import { LocationPage } from 'page/LocationPage';
 import { ItemPage } from 'page/ItemPage';
@@ -12,6 +12,7 @@ import { NewEntityPage } from 'page/NewEntityPage';
 import { EditEntityPage } from 'page/EditEntityPage';
 import { EntityTypesPage } from 'page/EntityTypesPage';
 import { TagsPage } from 'page/TagsPage';
+import { SettingsPage } from 'page/SettingsPage';
 
 /**
  * Renders the page routes (mirroring `App.tsx`, minus the shell) at `path`, so a
@@ -33,6 +34,8 @@ export const renderRoute = (path: string, mocks: MockedResponse[]) =>
           <Route path="/items/:id/edit" element={<EditEntityPage />} />
           <Route path="/types" element={<EntityTypesPage />} />
           <Route path="/tags" element={<TagsPage />} />
+          <Route path="/settings" element={<Navigate to="/settings/ai" replace />} />
+          <Route path="/settings/:tab" element={<SettingsPage />} />
           <Route path="/search" element={<SearchPage />} />
           <Route path="*" element={<NotFound />} />
         </Routes>

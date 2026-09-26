@@ -2,6 +2,7 @@
 export const NAV_LINKS = [
   { to: '/types', label: 'Types' },
   { to: '/tags', label: 'Tags' },
+  { to: '/settings', label: 'Settings' },
 ] as const;
 
 /** A nav link's classes, accent-coloured while its page is current. */

@@ -2,7 +2,7 @@ import React, { Suspense, useEffect, useState } from 'react';
 import { ApolloClient, HttpLink, InMemoryCache } from '@apollo/client';
 import { ApolloProvider } from '@apollo/client/react';
 import { ToastContainer } from 'react-toastify';
-import { RouteObject, RouterProvider, createBrowserRouter } from 'react-router-dom';
+import { Navigate, RouteObject, RouterProvider, createBrowserRouter } from 'react-router-dom';
 import 'react-toastify/dist/ReactToastify.css';
 import { ThemeProvider } from 'theme/ThemeProvider';
 
@@ -16,6 +16,7 @@ const NewEntityPage = React.lazy(() => import('page/NewEntityPage'));
 const EditEntityPage = React.lazy(() => import('page/EditEntityPage'));
 const EntityTypesPage = React.lazy(() => import('page/EntityTypesPage'));
 const TagsPage = React.lazy(() => import('page/TagsPage'));
+const SettingsPage = React.lazy(() => import('page/SettingsPage'));
 
 const apolloClient = new ApolloClient({
   cache: new InMemoryCache(),
@@ -36,6 +37,8 @@ const routes: RouteObject[] = [
       { path: 'items/:id/edit', element: <EditEntityPage /> },
       { path: 'types', element: <EntityTypesPage /> },
       { path: 'tags', element: <TagsPage /> },
+      { path: 'settings', element: <Navigate to="/settings/ai" replace /> },
+      { path: 'settings/:tab', element: <SettingsPage /> },
       { path: 'search', element: <SearchPage /> },
       { path: '*', element: <NotFound /> },
     ],
