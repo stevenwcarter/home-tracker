@@ -13,6 +13,10 @@ describe('thumbUrlAt', () => {
   it('works without a query string', () => {
     expect(thumbUrlAt('/attachments/a/thumb/300', 1200)).toBe('/attachments/a/thumb/1200');
   });
+
+  it('returns the input unchanged when there is no /thumb/<n> segment', () => {
+    expect(thumbUrlAt('/attachments/x?v=abc', 300)).toBe('/attachments/x?v=abc');
+  });
 });
 
 describe('Thumb', () => {

@@ -55,6 +55,53 @@ describe('buildLocationTree', () => {
     expect(tree[0].children).toEqual([]);
   });
 
+  // descendants_of_cycle_members_stay_nested (Task 4 review, blocking): a
+  // location that hangs off a cycle member without itself being part of the
+  // cycle must still nest under that member, not get flattened alongside it.
+  it('keeps a non-cyclic descendant nested under its cycle-member parent', () => {
+    const locations = [loc('a', 'Alpha', 'b'), loc('b', 'Beta', 'a'), loc('d', 'Delta', 'a')];
+
+    const tree = buildLocationTree(locations);
+
+    expect(tree).toHaveLength(2);
+    const byId = new Map(tree.map((n) => [n.location.id, n]));
+    expect([...byId.keys()].sort()).toEqual(['a', 'b']);
+    expect(byId.get('a')?.children.map((n) => n.location.id)).toEqual(['d']);
+    expect(byId.get('b')?.children).toEqual([]);
+    // Every id present exactly once across the whole tree.
+    const allIds = tree.flatMap((n) => [n.location.id, ...n.children.map((c) => c.location.id)]);
+    expect(allIds.sort()).toEqual(['a', 'b', 'd']);
+  });
+
+  // a_deeper_chain_under_a_cycle_is_preserved (Task 4 review, blocking): a
+  // multi-level chain hanging off a cycle member survives intact (A > D > E),
+  // alongside both cycle members as their own roots.
+  it('preserves a deeper chain hanging off a cycle member', () => {
+    const locations = [
+      loc('a', 'Alpha', 'b'),
+      loc('b', 'Beta', 'a'),
+      loc('d', 'Delta', 'a'),
+      loc('e', 'Echo', 'd'),
+    ];
+
+    const tree = buildLocationTree(locations);
+
+    expect(tree).toHaveLength(2);
+    const byId = new Map(tree.map((n) => [n.location.id, n]));
+    expect([...byId.keys()].sort()).toEqual(['a', 'b']);
+    const aNode = byId.get('a');
+    expect(aNode?.children.map((n) => n.location.id)).toEqual(['d']);
+    expect(aNode?.children[0].children.map((n) => n.location.id)).toEqual(['e']);
+    expect(aNode?.children[0].children[0].children).toEqual([]);
+    expect(byId.get('b')?.children).toEqual([]);
+    const allIds = [
+      ...tree.map((n) => n.location.id),
+      ...(aNode?.children.map((n) => n.location.id) ?? []),
+      ...(aNode?.children[0].children.map((n) => n.location.id) ?? []),
+    ];
+    expect(allIds.sort()).toEqual(['a', 'b', 'd', 'e']);
+  });
+
   it('returns [] for an empty input', () => {
     expect(buildLocationTree([])).toEqual([]);
   });
