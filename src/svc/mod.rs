@@ -9,3 +9,4 @@ pub mod settings;
 pub mod stats;
 pub mod tag;
 pub mod thumbnail;
+pub mod thumbnail_service;

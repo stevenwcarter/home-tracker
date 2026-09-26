@@ -6,12 +6,15 @@ use home_tracker::routes::app;
 use home_tracker::schema::{attachments, entities};
 use home_tracker::svc::fixtures::{self, SampleIds, seed_sample};
 use serde_json::{Value, json};
+use tempfile::TempDir;
 
-async fn seeded() -> (TestServer, SampleIds, TestDb) {
+/// A server over the seeded sample; the `TempDir` is its (empty) data dir.
+async fn seeded() -> (TestServer, SampleIds, TestDb, TempDir) {
     let db = TestDb::new();
     let ids = seed_sample(&mut db.pool.get().unwrap());
-    let server = TestServer::new(app(db.pool.clone()));
-    (server, ids, db)
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
+    (server, ids, db, data)
 }
 
 async fn query(server: &TestServer, q: &str, vars: Value) -> Value {
@@ -36,7 +39,7 @@ fn names(list: &Value) -> Vec<&str> {
 
 #[tokio::test]
 async fn entity_types_lists_all_with_counts() {
-    let (server, _ids, _db) = seeded().await;
+    let (server, _ids, _db, _data) = seeded().await;
 
     let data = query(
         &server,
@@ -57,7 +60,7 @@ async fn entity_types_lists_all_with_counts() {
 
 #[tokio::test]
 async fn locations_is_flat_with_parent_ids() {
-    let (server, ids, _db) = seeded().await;
+    let (server, ids, _db, _data) = seeded().await;
 
     let data = query(
         &server,
@@ -82,7 +85,7 @@ async fn locations_is_flat_with_parent_ids() {
 
 #[tokio::test]
 async fn entity_returns_every_scalar_and_relationship() {
-    let (server, ids, _db) = seeded().await;
+    let (server, ids, _db, _data) = seeded().await;
 
     let data = query(
         &server,
@@ -151,7 +154,7 @@ async fn entity_returns_every_scalar_and_relationship() {
 
 #[tokio::test]
 async fn entity_child_locations_and_items() {
-    let (server, ids, _db) = seeded().await;
+    let (server, ids, _db, _data) = seeded().await;
 
     let data = query(
         &server,
@@ -166,7 +169,7 @@ async fn entity_child_locations_and_items() {
 
 #[tokio::test]
 async fn entity_returns_null_for_unknown_id() {
-    let (server, _ids, _db) = seeded().await;
+    let (server, _ids, _db, _data) = seeded().await;
 
     let data = query(
         &server,
@@ -180,7 +183,7 @@ async fn entity_returns_null_for_unknown_id() {
 
 #[tokio::test]
 async fn root_items_lists_parentless_items() {
-    let (server, _ids, _db) = seeded().await;
+    let (server, _ids, _db, _data) = seeded().await;
 
     let data = query(&server, "{ rootItems { name } }", json!({})).await;
 
@@ -189,7 +192,7 @@ async fn root_items_lists_parentless_items() {
 
 #[tokio::test]
 async fn tags_list_with_parent_and_count() {
-    let (server, _ids, _db) = seeded().await;
+    let (server, _ids, _db, _data) = seeded().await;
 
     let data = query(
         &server,
@@ -207,7 +210,7 @@ async fn tags_list_with_parent_and_count() {
 
 #[tokio::test]
 async fn search_finds_by_substring_with_limit() {
-    let (server, _ids, _db) = seeded().await;
+    let (server, _ids, _db, _data) = seeded().await;
 
     let limited = query(
         &server,
@@ -234,7 +237,8 @@ async fn search_limit_is_clamped() {
                 .unwrap();
         }
     }
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
 
     let hits = |limit: i32| {
         let server = &server;
@@ -250,7 +254,7 @@ async fn search_limit_is_clamped() {
 
 #[tokio::test]
 async fn attachment_urls_carry_a_version_tag() {
-    let (server, ids, _db) = seeded().await;
+    let (server, ids, _db, _data) = seeded().await;
 
     let data = query(
         &server,
@@ -270,7 +274,7 @@ async fn attachment_urls_carry_a_version_tag() {
 
 #[tokio::test]
 async fn thumbnail_url_is_null_for_non_images_and_case_insensitive() {
-    let (server, ids, db) = seeded().await;
+    let (server, ids, db, _data) = seeded().await;
     {
         let mut conn = db.pool.get().unwrap();
         diesel::update(attachments::table.find(&ids.manual))
@@ -298,7 +302,7 @@ async fn thumbnail_url_is_null_for_non_images_and_case_insensitive() {
 
 #[tokio::test]
 async fn argument_types_and_defaults_match_the_spec() {
-    let (server, _ids, _db) = seeded().await;
+    let (server, _ids, _db, _data) = seeded().await;
 
     let data = query(
         &server,

@@ -1,9 +1,14 @@
 //! Plain HTTP handlers (everything that is not GraphQL).
 
-use axum::http::StatusCode;
+use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
+pub mod attachments;
 pub mod graphql;
+
+/// `Cache-Control` for content-addressed or versioned responses.
+pub const IMMUTABLE_CACHE: HeaderValue =
+    HeaderValue::from_static("public, max-age=31536000, immutable");
 
 /// `anyhow::Error` → 500 with the message. Handlers return `Result<_, AppError>` and use `?`.
 pub struct AppError(pub anyhow::Error);

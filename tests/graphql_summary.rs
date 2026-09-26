@@ -14,7 +14,8 @@ async fn summary_query_reports_the_sample_statistics() {
         let mut conn = db.pool.get().unwrap();
         seed_sample(&mut conn);
     }
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
 
     let response = server
         .post("/graphql")
@@ -51,7 +52,8 @@ async fn summary_reports_a_graphql_error_when_currency_is_missing() {
             .execute(&mut conn)
             .unwrap();
     }
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
 
     let response = server
         .post("/graphql")
@@ -68,7 +70,8 @@ async fn summary_reports_a_graphql_error_when_currency_is_missing() {
 #[tokio::test]
 async fn get_is_not_allowed() {
     let db = TestDb::new();
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
 
     let response = server.get("/graphql?query={summary{currency}}").await;
 
@@ -78,7 +81,8 @@ async fn get_is_not_allowed() {
 #[tokio::test]
 async fn unknown_field_is_a_graphql_error_not_a_500() {
     let db = TestDb::new();
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
 
     let response = server
         .post("/graphql")

@@ -14,7 +14,8 @@ use uuid::Uuid;
 #[tokio::test]
 async fn root_serves_the_spa_shell_as_html() {
     let db = TestDb::new();
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
     let response = server.get("/").await;
     response.assert_status_ok();
     assert!(
@@ -31,7 +32,8 @@ async fn root_serves_the_spa_shell_as_html() {
 async fn deep_links_fall_back_to_the_spa_shell() {
     // Review focus 4: a reload on /locations/abc must boot the SPA, not 404.
     let db = TestDb::new();
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
     let shell = server.get("/").await;
     let deep = server.get("/locations/abc").await;
     deep.assert_status_ok();
@@ -48,7 +50,8 @@ async fn deep_links_fall_back_to_the_spa_shell() {
 #[tokio::test]
 async fn missing_assets_are_404_not_the_shell() {
     let db = TestDb::new();
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
     let response = server.get("/assets/does-not-exist.js").await;
     response.assert_status_not_found();
     // Review focus (minor): a 404 must not be cached immutably, or a cache sitting in
@@ -70,7 +73,8 @@ async fn a_real_asset_is_served_with_the_immutable_cache_header() {
     let _asset = TempAsset::create(&name, "// test asset");
 
     let db = TestDb::new();
-    let server = TestServer::new(app(db.pool.clone()));
+    let data = tempfile::tempdir().unwrap();
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
     let response = server.get(&format!("/assets/{name}")).await;
 
     response.assert_status_ok();

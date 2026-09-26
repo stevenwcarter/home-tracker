@@ -1,5 +1,7 @@
 //! Attachment metadata and stored thumbnails.
 
+use std::path::{Path, PathBuf};
+
 use anyhow::{Context, Result};
 use diesel::prelude::*;
 
@@ -54,6 +56,11 @@ pub fn get(conn: &mut SqliteConnection, id: &str) -> Result<Option<Attachment>> 
         .with_context(|| format!("loading attachment {id:?}"))
 }
 
+/// Where the bytes of the original with `sha256` live under `data_dir`.
+pub fn original_path(data_dir: &Path, sha256: &str) -> PathBuf {
+    data_dir.join("originals").join(sha256)
+}
+
 /// The stored thumbnail of exactly `size`; no fallback to another size.
 pub fn thumbnail(
     conn: &mut SqliteConnection,
@@ -66,6 +73,21 @@ pub fn thumbnail(
         .first(conn)
         .optional()
         .with_context(|| format!("loading the {size}px thumbnail of attachment {attachment_id:?}"))
+}
+
+/// Stores `thumb` unless a row for its `(attachment_id, size)` already exists.
+pub fn insert_thumbnail(conn: &mut SqliteConnection, thumb: &Thumbnail) -> Result<()> {
+    diesel::insert_into(thumbnails::table)
+        .values(thumb)
+        .on_conflict_do_nothing()
+        .execute(conn)
+        .with_context(|| {
+            format!(
+                "storing the {}px thumbnail of attachment {:?}",
+                thumb.size, thumb.attachment_id
+            )
+        })?;
+    Ok(())
 }
 
 #[cfg(test)]

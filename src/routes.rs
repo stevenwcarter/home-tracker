@@ -1,19 +1,23 @@
-//! Top-level router: GraphQL, static assets, SPA fallback, compression.
+//! Top-level router: GraphQL, attachments, static assets, SPA fallback, compression.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
 use axum::extract::Request;
-use axum::http::{HeaderValue, StatusCode, Uri, header};
+use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
 use rust_embed::RustEmbed;
 use tower_http::compression::CompressionLayer;
 
+use crate::api::IMMUTABLE_CACHE;
+use crate::api::attachments::attachment_routes;
 use crate::api::graphql::graphql_routes;
 use crate::db::SqlitePool;
 use crate::graphql::schema::create_schema;
+use crate::svc::thumbnail_service::ThumbnailService;
 
 /// The Vite build output. `site/build` must exist at compile time (see `just site-placeholder`).
 #[derive(RustEmbed, Clone)]
@@ -45,15 +49,21 @@ async fn immutable_cache(request: Request, next: Next) -> Response {
     // immutably would make a missing (or not-yet-deployed) asset stay missing for a
     // year in front of any cache.
     if response.status().is_success() {
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=31536000, immutable"),
-        );
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, IMMUTABLE_CACHE);
     }
     response
 }
 
-pub fn app(pool: SqlitePool) -> Router {
+/// The whole application; originals and thumbnails are read from `data_dir`.
+pub fn app(pool: SqlitePool, data_dir: PathBuf) -> Router {
+    let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
+    app_with_thumbnails(pool, thumbnails)
+}
+
+/// [`app`] around a caller-supplied thumbnail service, so tests can observe it.
+pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
     let schema = Arc::new(create_schema());
     Router::new()
         .route("/assets/{*path}", get(static_handler))
@@ -62,6 +72,7 @@ pub fn app(pool: SqlitePool) -> Router {
         // (and a missing-asset 404) would be cached immutably too. Pinned by
         // tests/spa_routes.rs.
         .layer(middleware::from_fn(immutable_cache))
+        .merge(attachment_routes(pool.clone(), thumbnails))
         .merge(graphql_routes(pool, schema))
         .route("/", get(index_handler))
         .fallback(get(index_handler))

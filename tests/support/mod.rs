@@ -3,6 +3,8 @@
 //! photo with its WebP thumbnail, a PDF manual, one template with one field,
 //! and one (unsupported) maintenance entry. Test-only code: failures panic.
 
+pub mod images;
+
 use std::fs::{self, File};
 use std::io::{Cursor, Write};
 use std::path::Path;

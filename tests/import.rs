@@ -1,3 +1,5 @@
+// Each test crate uses a different subset of the shared fixture builder.
+#[allow(dead_code)]
 mod support;
 
 use std::fs;

@@ -27,7 +27,7 @@ async fn an_imported_backup_reads_back_through_graphql() {
         data.path(),
     )
     .unwrap();
-    let server = TestServer::new(app(db.pool.clone()));
+    let server = TestServer::new(app(db.pool.clone(), data.path().to_path_buf()));
 
     let response = server
         .post("/graphql")

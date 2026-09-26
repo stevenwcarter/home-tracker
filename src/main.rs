@@ -80,7 +80,7 @@ async fn serve(config: Config) -> Result<()> {
         .context("registering the listener with tokio")?;
     tracing::info!(%addr, dual_stack = addr.is_ipv6(), "listening");
 
-    axum::serve(listener, routes::app(pool))
+    axum::serve(listener, routes::app(pool, config.data_dir))
         .with_graceful_shutdown(shutdown_signal())
         .await
         .context("server error")
