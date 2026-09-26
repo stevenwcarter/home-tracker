@@ -1,11 +1,13 @@
 //! The AI settings surface through `/graphql`: defaults, the write-only key,
-//! environment overrides, validation, and the write gate.
+//! environment overrides, validation, the connection test, and the write gate.
 
 use std::sync::Arc;
 
 use axum_test::TestServer;
 use home_tracker::ai::AiState;
+use home_tracker::ai::client::{AiError, ChatRequest, ContentPart, Message, Role as ChatRole};
 use home_tracker::ai::env::AiEnv;
+use home_tracker::ai::fake::FakeAiClient;
 use home_tracker::db::TestDb;
 use home_tracker::graphql::context::{Actor, Role};
 use home_tracker::routes::{app_with_actor, app_with_ai};
@@ -25,16 +27,34 @@ const UPDATE: &str = "mutation($input: AiSettingsInput!) {
     }
 }";
 
-/// A server whose AI environment is `env`; the `TempDir` is its data dir.
-fn server_with(env: AiEnv) -> (TestServer, TestDb, TempDir) {
+const TEST_CONNECTION: &str = "mutation { testAiConnection { ok message latencyMs } }";
+
+/// A server with AI state `ai`; the `TempDir` is its data dir.
+fn server_with_ai(ai: AiState) -> (TestServer, TestDb, TempDir) {
     let db = TestDb::new();
     let data = tempfile::tempdir().unwrap();
-    let ai = Arc::new(AiState {
+    let server = TestServer::new(app_with_ai(
+        db.pool.clone(),
+        data.path().to_path_buf(),
+        Arc::new(ai),
+    ));
+    (server, db, data)
+}
+
+/// A server whose AI environment is `env`, with the model client disabled.
+fn server_with(env: AiEnv) -> (TestServer, TestDb, TempDir) {
+    server_with_ai(AiState {
         env,
         ..AiState::disabled()
-    });
-    let server = TestServer::new(app_with_ai(db.pool.clone(), data.path().to_path_buf(), ai));
-    (server, db, data)
+    })
+}
+
+/// A server whose model client is `fake`, with no environment overrides.
+fn server_with_fake(fake: &Arc<FakeAiClient>) -> (TestServer, TestDb, TempDir) {
+    server_with_ai(AiState {
+        env: AiEnv::none(),
+        client: Arc::clone(fake) as _,
+    })
 }
 
 fn server() -> (TestServer, TestDb, TempDir) {
@@ -274,6 +294,83 @@ async fn extra_instructions_over_4000_chars_are_refused() {
     assert_eq!(settings["extraInstructions"], Value::Null);
 }
 
+/// `testAiConnection`, which must not error; its result object.
+async fn test_connection(server: &TestServer) -> Value {
+    let body = post(server, TEST_CONNECTION, json!({})).await;
+    assert!(body.get("errors").is_none(), "unexpected errors: {body}");
+    body["data"]["testAiConnection"].clone()
+}
+
+#[tokio::test]
+async fn test_connection_reports_ok_via_the_fake() {
+    let fake = Arc::new(FakeAiClient::new());
+    let (server, _db, _data) = server_with_fake(&fake);
+    update(
+        &server,
+        input(json!({ "apiKey": KEY, "synthesisModel": "synth-1" })),
+    )
+    .await;
+    fake.push(Ok("OK".to_owned()));
+
+    let result = test_connection(&server).await;
+    assert_eq!(result["ok"], json!(true), "{result}");
+    let message = result["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Connected: synth-1 answered in ") && message.ends_with(" ms"),
+        "{message}"
+    );
+    assert!(result["latencyMs"].as_i64().unwrap() >= 0, "{result}");
+
+    assert_eq!(
+        fake.requests(),
+        [ChatRequest {
+            model: "synth-1".to_owned(),
+            messages: vec![Message {
+                role: ChatRole::User,
+                content: vec![ContentPart::Text(
+                    "Reply with the single word OK.".to_owned()
+                )],
+            }],
+            response_format: None,
+            max_tokens: Some(8),
+        }]
+    );
+}
+
+#[tokio::test]
+async fn test_connection_reports_the_provider_error() {
+    let fake = Arc::new(FakeAiClient::new());
+    let (server, _db, _data) = server_with_fake(&fake);
+    update(&server, input(json!({ "apiKey": KEY }))).await;
+    let error = AiError::Status {
+        status: 401,
+        snippet: "invalid key".to_owned(),
+    };
+    fake.push(Err(error.clone()));
+
+    let result = test_connection(&server).await;
+    assert_eq!(result["ok"], json!(false), "{result}");
+    assert_eq!(result["message"], json!(error.to_string()));
+    assert!(!result.to_string().contains(KEY), "key leaked: {result}");
+}
+
+#[tokio::test]
+async fn test_connection_reports_not_configured() {
+    let fake = Arc::new(FakeAiClient::new());
+    let (server, _db, _data) = server_with_fake(&fake);
+
+    let result = test_connection(&server).await;
+    assert_eq!(
+        result,
+        json!({
+            "ok": false,
+            "message": "AI is not configured: add an API key first",
+            "latencyMs": 0,
+        })
+    );
+    assert!(fake.requests().is_empty(), "no call without a key");
+}
+
 #[tokio::test]
 async fn read_only_actor_is_forbidden() {
     let db = TestDb::new();
@@ -295,6 +392,9 @@ async fn read_only_actor_is_forbidden() {
     .await;
     assert!(err.contains("Forbidden"), "{err}");
     assert_eq!(stored_key(&db), None);
+    let body = post(&server, TEST_CONNECTION, json!({})).await;
+    let err = body["errors"][0]["message"].as_str().unwrap_or_default();
+    assert!(err.contains("Forbidden"), "{body}");
     // Reading is still allowed, and shows nothing changed.
     let settings = query_body(&server).await["data"]["aiSettings"].clone();
     assert_eq!(settings["visionModel"], json!("gpt-5-mini"));

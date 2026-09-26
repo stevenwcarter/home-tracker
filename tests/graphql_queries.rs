@@ -403,6 +403,7 @@ async fn argument_types_and_defaults_match_the_spec() {
             "setPrimaryPhoto(attachmentId: ID!): Entity!",
             // AI ingest spec §6.
             "updateAiSettings(input: AiSettingsInput!): AiSettings!",
+            "testAiConnection(): AiTestResult!",
         ]
     );
 

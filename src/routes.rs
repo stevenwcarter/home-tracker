@@ -16,6 +16,7 @@ use tower_http::compression::CompressionLayer;
 
 use crate::ai::AiState;
 use crate::ai::env::AiEnv;
+use crate::ai::openai::OpenAiClient;
 use crate::api::IMMUTABLE_CACHE;
 use crate::api::actor::attach_actor;
 use crate::api::attachments::attachment_routes;
@@ -68,10 +69,9 @@ async fn immutable_cache(request: Request, next: Next) -> Response {
 pub fn app(pool: SqlitePool, data_dir: PathBuf) -> Router {
     let env = AiEnv::from_env();
     tracing::info!(overrides = ?env.overridden(), "AI environment");
-    // Task 3 flips this to OpenAiClient.
     let ai = Arc::new(AiState {
         env,
-        ..AiState::disabled()
+        client: Arc::new(OpenAiClient::new()),
     });
     let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
     with_actor_seam(routes(pool, thumbnails, ai))

@@ -1,5 +1,5 @@
 use crate::graphql::context::GraphQLContext;
-use crate::svc::ai_settings::AiSettingsView;
+use crate::svc::ai_settings::{AiSettingsView, AiTestResult};
 
 /// The AI settings; says whether an API key exists, never what it is.
 #[juniper::graphql_object(context = GraphQLContext, name = "AiSettings")]
@@ -26,5 +26,21 @@ impl AiSettingsView {
     #[graphql(name = "fromEnvironment")]
     fn environment_overrides(&self) -> &[&'static str] {
         &self.from_environment
+    }
+}
+
+/// The outcome of `testAiConnection`.
+#[juniper::graphql_object(context = GraphQLContext, name = "AiTestResult")]
+impl AiTestResult {
+    /// Whether the model answered.
+    fn ok(&self) -> bool {
+        self.ok
+    }
+    /// Which model answered and how fast, or why the call failed.
+    fn message(&self) -> &str {
+        &self.message
+    }
+    fn latency_ms(&self) -> i32 {
+        self.latency_ms
     }
 }

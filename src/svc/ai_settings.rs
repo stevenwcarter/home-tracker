@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::str::FromStr;
+use std::time::Instant;
 
 use anyhow::{Context, Result, bail, ensure};
 use axum::http::Uri;
@@ -15,6 +16,7 @@ use axum::http::uri::Scheme;
 use diesel::prelude::*;
 
 use crate::ai::REDACTED;
+use crate::ai::client::{AiClient, ChatRequest, ContentPart, Message, Role};
 use crate::ai::env::{API_KEY_VAR, AiEnv, BASE_URL_VAR};
 use crate::schema::settings;
 use crate::svc::{optional_text, required_text};
@@ -164,6 +166,47 @@ pub fn config(conn: &mut SqliteConnection, env: &AiEnv) -> Result<Option<AiConfi
         synthesis_model: stored.synthesis_model,
         extra_instructions: stored.extra_instructions,
     }))
+}
+
+/// The outcome of [`test_connection`], as the settings screen shows it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AiTestResult {
+    pub ok: bool,
+    /// Which model answered and how fast, or why the call failed.
+    pub message: String,
+    pub latency_ms: i32,
+}
+
+/// Sends the synthesis model the smallest possible chat completion and
+/// reports whether an answer came back. Takes no connection, so the caller
+/// releases its database connection before the network call.
+pub async fn test_connection(config: &AiConfig, client: &dyn AiClient) -> AiTestResult {
+    let request = ChatRequest {
+        model: config.synthesis_model.clone(),
+        messages: vec![Message {
+            role: Role::User,
+            content: vec![ContentPart::Text(
+                "Reply with the single word OK.".to_owned(),
+            )],
+        }],
+        response_format: None,
+        max_tokens: Some(8),
+    };
+    let started = Instant::now();
+    let answer = client.chat(config, request).await;
+    let latency_ms = i32::try_from(started.elapsed().as_millis()).unwrap_or(i32::MAX);
+    match answer {
+        Ok(response) => AiTestResult {
+            ok: true,
+            message: format!("Connected: {} answered in {latency_ms} ms", response.model),
+            latency_ms,
+        },
+        Err(err) => AiTestResult {
+            ok: false,
+            message: err.to_string(),
+            latency_ms,
+        },
+    }
 }
 
 /// What an update does to the stored key.

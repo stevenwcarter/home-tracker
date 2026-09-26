@@ -6,9 +6,10 @@ use juniper::{FieldResult, ID};
 use super::context::GraphQLContext;
 use super::inputs::{AiSettingsInput, EntityInput, EntityTypeInput, TagInput};
 use super::schema::graphql_translate_anyhow as gql;
+use crate::ai::client::AiError;
 use crate::models::{Entity, EntityType, Tag};
 use crate::svc;
-use crate::svc::ai_settings::AiSettingsView;
+use crate::svc::ai_settings::{AiSettingsView, AiTestResult};
 
 pub struct Mutation;
 
@@ -119,6 +120,25 @@ impl Mutation {
             .conn()
             .and_then(|mut c| svc::ai_settings::update(&mut c, &ctx.ai.env, input.into())))
     }
+
+    /// Sends the synthesis model a tiny chat completion and reports whether
+    /// it answered; a failure is a result with `ok: false`, not an error.
+    async fn test_ai_connection(ctx: &GraphQLContext) -> FieldResult<AiTestResult> {
+        ctx.require_write()?;
+        // The connection is released at the end of this statement, before
+        // the network call, so a slow provider never holds a pool slot.
+        let config = gql(ctx
+            .conn()
+            .and_then(|mut c| svc::ai_settings::config(&mut c, &ctx.ai.env)))?;
+        Ok(match config {
+            Some(config) => svc::ai_settings::test_connection(&config, &*ctx.ai.client).await,
+            None => AiTestResult {
+                ok: false,
+                message: AiError::NotConfigured.to_string(),
+                latency_ms: 0,
+            },
+        })
+    }
 }
 
 #[cfg(test)]
@@ -178,7 +198,7 @@ mod tests {
 
     /// One document per mutation, each valid for a write actor on the sample
     /// (plus the unused type `spare_type`), so a refusal can only be the gate.
-    fn mutations(ids: &SampleIds, spare_type: &str) -> [String; 12] {
+    fn mutations(ids: &SampleIds, spare_type: &str) -> [String; 13] {
         let item = ITEM_TYPE_ID;
         [
             format!(
@@ -209,6 +229,9 @@ mod tests {
             ),
             r#"mutation { updateAiSettings(input: { baseUrl: "https://llm.example/v1", visionModel: "v", synthesisModel: "s", apiKey: "k" }) { hasApiKey } }"#
                 .to_owned(),
+            // After the save above, so a writer gets a configured (but
+            // disabled) client: an `ok: false` result, not a field error.
+            "mutation { testAiConnection { ok } }".to_owned(),
         ]
     }
 

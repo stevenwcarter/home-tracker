@@ -3,6 +3,9 @@
 
 pub mod client;
 pub mod env;
+pub mod fake;
+pub mod openai;
+pub mod prompts;
 
 use std::sync::Arc;
 
