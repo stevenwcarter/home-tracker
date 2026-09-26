@@ -23,6 +23,8 @@ pub struct IngestBatch {
 pub struct IngestItem {
     pub id: String,
     pub batch_id: String,
+    /// Orders the batch's items. Removals leave gaps, so callers label an
+    /// item by its index in the list, never by this number.
     pub position: i32,
     pub status: IngestItemStatus,
     pub error: Option<String>,
@@ -39,6 +41,7 @@ pub struct IngestItem {
 pub struct IngestPhoto {
     pub id: String,
     pub item_id: String,
+    /// Orders the item's photos; gaps after removals, as for items.
     pub position: i32,
     pub sha256: String,
     pub mime_type: String,

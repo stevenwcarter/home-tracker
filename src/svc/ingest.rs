@@ -52,6 +52,8 @@ pub enum IngestError {
     NotReviewable,
     #[error("add at least one photo before submitting")]
     Empty,
+    #[error("photo kinds name a photo of another item")]
+    ForeignPhoto,
 }
 
 /// The ingest batch with `id`, if any.
@@ -359,7 +361,8 @@ pub fn set_item_suggestion(
 /// Turns reviewable item `item_id` into an entity built from `input` (the
 /// user's values, not the suggestion). Each staged photo becomes an
 /// attachment of the kind `kinds` gives it, else its suggested kind, else
-/// `photo`; the first `photo`-kind one is the primary photo. The staged rows
+/// `photo`; the first `photo`-kind one that can be thumbnailed is the
+/// primary photo (none if there is no such one). The staged rows
 /// are deleted in the same transaction the attachments are inserted in, so
 /// the originals are shared throughout and no file is touched.
 pub fn accept(
@@ -375,7 +378,7 @@ pub fn accept(
             kinds
                 .iter()
                 .all(|(id, _)| staged.iter().any(|photo| &photo.id == id)),
-            "photo kinds name a photo of another item"
+            IngestError::ForeignPhoto
         );
         let created = entity::create(conn, input)?;
         let chosen: Vec<AttachmentKind> = staged
@@ -388,9 +391,11 @@ pub fn accept(
                     .unwrap_or(AttachmentKind::Photo)
             })
             .collect();
-        let primary = chosen
-            .iter()
-            .position(|&kind| kind == AttachmentKind::Photo);
+        // Like `promote_earliest_photo`: a photo nothing can thumbnail
+        // would be a primary photo nothing can show.
+        let primary = staged.iter().zip(&chosen).position(|(photo, &kind)| {
+            kind == AttachmentKind::Photo && thumbnail::is_thumbnailable(&photo.mime_type)
+        });
         let now = now();
         let rows: Vec<Attachment> = staged
             .into_iter()
@@ -424,6 +429,7 @@ pub fn accept(
             ))
             .execute(conn)
             .with_context(|| format!("marking ingest item {item_id:?} accepted"))?;
+        touch(conn, &item.batch_id)?;
         settle_batch(conn, &item.batch_id)?;
         Ok(created)
     })
@@ -433,7 +439,8 @@ pub fn accept(
 /// staged photos are deleted, and their originals once nothing else shares
 /// them.
 pub fn skip(conn: &mut SqliteConnection, data_dir: &Path, item_id: &str) -> Result<IngestItem> {
-    let (item, shas) = conn.transaction(|conn| {
+    // Immediate, as the runner may be writing to the same batch.
+    let (item, shas) = conn.immediate_transaction(|conn| {
         let item = require_reviewable(conn, item_id)?;
         let shas = delete_photos_of(conn, &[item_id])?;
         diesel::update(ingest_items::table.find(item_id))
@@ -443,6 +450,7 @@ pub fn skip(conn: &mut SqliteConnection, data_dir: &Path, item_id: &str) -> Resu
             ))
             .execute(conn)
             .with_context(|| format!("marking ingest item {item_id:?} skipped"))?;
+        touch(conn, &item.batch_id)?;
         settle_batch(conn, &item.batch_id)?;
         Ok::<_, anyhow::Error>((require_item(conn, item_id)?, shas))
     })?;
@@ -685,7 +693,7 @@ mod tests {
     use crate::db::{ITEM_TYPE_ID, TestDb};
     use crate::kinds::{IngestBatchStatus, IngestPhotoStatus};
     use crate::models::Thumbnail;
-    use crate::schema::{entities, ingest_batches, ingest_photos};
+    use crate::schema::{entities, ingest_batches, ingest_items, ingest_photos};
     use crate::svc::attachment::{self, original_path};
     use crate::svc::fixtures::{at, entity_input, ingest_batch, ingest_photo, seed_sample};
 
@@ -739,6 +747,75 @@ mod tests {
         submit(conn, &batch.id).unwrap();
         set_item_status(conn, &item.id, IngestItemStatus::Ready, None).unwrap();
         (batch, item, photos)
+    }
+
+    /// Inserts a ready item with one staged photo straight into submitted
+    /// batch `batch_id` (submission forbids `add_item`) and returns its id.
+    fn ready_item_in(conn: &mut SqliteConnection, batch_id: &str) -> String {
+        let position: i32 = ingest_items::table
+            .filter(ingest_items::batch_id.eq(batch_id))
+            .count()
+            .get_result::<i64>(conn)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let item = insert_item(conn, batch_id, position + 10).unwrap();
+        set_item_status(conn, &item.id, IngestItemStatus::Ready, None).unwrap();
+        stage_row(conn, &item.id, &"ab".repeat(32), "image/jpeg", None);
+        item.id
+    }
+
+    /// A ready item of a new submitted batch whose photos are the rows
+    /// `(sha256, mime_type, suggested kind)`, inserted directly so a test can
+    /// stage a MIME type the upload would refuse. Returns the item id.
+    fn staged_item(
+        conn: &mut SqliteConnection,
+        rows: &[(&str, &str, Option<SuggestedKind>)],
+    ) -> String {
+        let (batch, item) = ingest_batch(conn, None);
+        for &(sha256, mime_type, kind) in rows {
+            stage_row(conn, &item.id, sha256, mime_type, kind);
+        }
+        submit(conn, &batch.id).unwrap();
+        set_item_status(conn, &item.id, IngestItemStatus::Ready, None).unwrap();
+        item.id
+    }
+
+    /// Inserts a staged photo row directly, bypassing the collecting check,
+    /// with `kind` as its suggested kind.
+    fn stage_row(
+        conn: &mut SqliteConnection,
+        item_id: &str,
+        sha256: &str,
+        mime_type: &str,
+        kind: Option<SuggestedKind>,
+    ) -> IngestPhoto {
+        let position: i32 = ingest_photos::table
+            .filter(ingest_photos::item_id.eq(item_id))
+            .count()
+            .get_result::<i64>(conn)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let photo = IngestPhoto {
+            id: Uuid::now_v7().to_string(),
+            item_id: item_id.to_owned(),
+            position,
+            sha256: sha256.to_owned(),
+            mime_type: mime_type.to_owned(),
+            size_bytes: 3,
+            title: "photo".to_owned(),
+            status: IngestPhotoStatus::Described,
+            error: None,
+            description: None,
+            suggested_kind: kind,
+            created_at: now(),
+        };
+        diesel::insert_into(ingest_photos::table)
+            .values(&photo)
+            .execute(conn)
+            .unwrap();
+        photo
     }
 
     #[test]
@@ -1032,16 +1109,85 @@ mod tests {
         let (_, _, foreign) = ready_item(&mut conn, None, &[&"dd".repeat(32)]);
         let kinds = [(foreign[0].id.clone(), AttachmentKind::Photo)];
 
-        let err = accept(
+        let result = accept(
             &mut conn,
             &item.id,
             entity_input("A", ITEM_TYPE_ID, None),
             &kinds,
-        )
-        .unwrap_err();
+        );
 
-        assert_eq!(err.to_string(), "photo kinds name a photo of another item");
+        assert_eq!(refusal(result), IngestError::ForeignPhoto);
         assert_eq!(photos(&mut conn, &item.id).unwrap().len(), 1);
+    }
+
+    /// Accepts ready item `item_id` as a new item with no kind overrides and
+    /// returns its attachments as `(mime_type, kind, is_primary)`, primary first.
+    fn accept_plainly(
+        conn: &mut SqliteConnection,
+        item_id: &str,
+    ) -> Vec<(String, AttachmentKind, bool)> {
+        let created = accept(conn, item_id, entity_input("A", ITEM_TYPE_ID, None), &[]).unwrap();
+        attachment::for_entity(conn, &created.id)
+            .unwrap()
+            .into_iter()
+            .map(|a| (a.mime_type, a.kind, a.is_primary))
+            .collect()
+    }
+
+    #[test]
+    fn the_primary_photo_is_the_first_that_can_be_thumbnailed() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let photo = Some(SuggestedKind::Photo);
+        let item = staged_item(
+            &mut conn,
+            &[
+                (&"cc".repeat(32), "image/heic", photo),
+                (&"dd".repeat(32), "image/jpeg", photo),
+            ],
+        );
+
+        assert_eq!(
+            accept_plainly(&mut conn, &item),
+            [
+                ("image/jpeg".to_owned(), AttachmentKind::Photo, true),
+                ("image/heic".to_owned(), AttachmentKind::Photo, false),
+            ]
+        );
+
+        let only_heic = staged_item(&mut conn, &[(&"ee".repeat(32), "image/heic", photo)]);
+        assert_eq!(
+            accept_plainly(&mut conn, &only_heic),
+            [("image/heic".to_owned(), AttachmentKind::Photo, false)]
+        );
+    }
+
+    #[test]
+    fn no_photo_kind_means_no_primary_and_no_kind_at_all_means_photo() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let receipt = Some(SuggestedKind::Receipt);
+        let documents = staged_item(
+            &mut conn,
+            &[
+                (&"cc".repeat(32), "image/jpeg", receipt),
+                (&"dd".repeat(32), "image/jpeg", receipt),
+            ],
+        );
+        assert_eq!(
+            accept_plainly(&mut conn, &documents),
+            [
+                ("image/jpeg".to_owned(), AttachmentKind::Receipt, false),
+                ("image/jpeg".to_owned(), AttachmentKind::Receipt, false),
+            ]
+        );
+
+        // A photo the vision step never described has no suggested kind.
+        let undescribed = staged_item(&mut conn, &[(&"ee".repeat(32), "image/jpeg", None)]);
+        assert_eq!(
+            accept_plainly(&mut conn, &undescribed),
+            [("image/jpeg".to_owned(), AttachmentKind::Photo, true)]
+        );
     }
 
     #[test]
@@ -1160,6 +1306,34 @@ mod tests {
         age(&mut conn);
         set_item_status(&mut conn, &item.id, IngestItemStatus::Analysing, None).unwrap();
         assert_eq!(cleanup_stale(&mut conn, data.path(), cutoff).unwrap(), 0);
+
+        // Reviewing an item a day keeps a batch alive even when an accept or
+        // skip leaves its status unchanged.
+        let later = ready_item_in(&mut conn, &batch.id);
+        set_item_status(&mut conn, &item.id, IngestItemStatus::Ready, None).unwrap();
+        settle_batch(&mut conn, &batch.id).unwrap();
+        age(&mut conn);
+        accept(
+            &mut conn,
+            &item.id,
+            entity_input("A", ITEM_TYPE_ID, None),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(
+            batch_status(&mut conn, &batch.id),
+            IngestBatchStatus::Reviewing
+        );
+        assert_eq!(cleanup_stale(&mut conn, data.path(), cutoff).unwrap(), 0);
+        let third = ready_item_in(&mut conn, &batch.id);
+        age(&mut conn);
+        skip(&mut conn, data.path(), &later).unwrap();
+        assert_eq!(
+            batch_status(&mut conn, &batch.id),
+            IngestBatchStatus::Reviewing
+        );
+        assert_eq!(cleanup_stale(&mut conn, data.path(), cutoff).unwrap(), 0);
+        assert!(get_item(&mut conn, &third).unwrap().is_some());
         assert_eq!(
             refusal(touch(&mut conn, "missing")),
             IngestError::NotFound(IngestRecord::Batch)
@@ -1183,8 +1357,11 @@ mod tests {
         settle_batch(&mut conn, &reviewed_batch).unwrap();
 
         let restart = requeue_interrupted(&mut conn).unwrap();
+        let again = requeue_interrupted(&mut conn).unwrap();
 
         assert_eq!(restart, [running.id.as_str()]);
+        // Nothing is left analysing, so a second call only lists the batch.
+        assert_eq!(again, restart);
         assert_eq!(
             statuses(&mut conn, &running.id),
             [IngestItemStatus::Queued, IngestItemStatus::Ready]
