@@ -83,6 +83,39 @@ carry `?v=<sha256 prefix>`, so they can be cached by the browser forever and
 still pick up new bytes after a re-import; each response also sets a matching
 `ETag`.
 
+## Editing
+
+A location page has Add item, Add location, Edit and Delete buttons; an item
+page has Edit and Delete. "Add" opens `/locations/:id/new` with the type
+preselected (`?type=` picks Location over the default Item). `/new` creates
+a parentless entity the same way, for a future top-level entry point. Edit
+opens `/locations/:id/edit` or `/items/:id/edit`. All these routes render the
+same `EntityForm`, split into Basics, Purchase, Warranty, Sold and Details
+sections; Purchase, Warranty and Sold start collapsed when the selected type
+is a location. Saving a create or edit goes to the entity's own page.
+
+Delete never uses the browser's `confirm()`; it opens an in-app confirmation
+dialog. Deleting an item or location navigates to its parent location, or
+home if it had none. On an item page, each attachment also has its own
+Delete and, for a photo that is not already primary, Make primary.
+
+`/types` and `/tags` list every entity type and tag with how many entities
+use it, and let you create, edit in place, and delete from the same table.
+
+**What validation refuses:**
+- A blank or whitespace-only name, for an entity, type, or tag.
+- An unknown entity type, parent id, or tag id.
+- Placing a location under an item (items may nest under items, but a
+  location may not).
+- Moving an entity under itself or one of its own descendants.
+- A negative quantity or a negative purchase/sold price.
+- Deleting an entity that still contains other entities; the error names how
+  many.
+- Deleting an entity type that is one of the built-in Location/Item types, or
+  still used by any entity; the error names the type or the count.
+- Turning a location type into a non-location type while any entity of that
+  type still holds a location child.
+
 ## Project layout
 
 ```
@@ -124,3 +157,5 @@ home-tracker/
 - Design spec: [`docs/superpowers/specs/2026-09-25-home-tracker-design.md`](docs/superpowers/specs/2026-09-25-home-tracker-design.md)
 - Phase 1 plan: [`docs/superpowers/plans/2026-09-25-phase-1-walking-skeleton.md`](docs/superpowers/plans/2026-09-25-phase-1-walking-skeleton.md)
 - Phase 2 plan: [`docs/superpowers/plans/2026-09-26-phase-2-real-data-and-import.md`](docs/superpowers/plans/2026-09-26-phase-2-real-data-and-import.md)
+- Phase 3 plan: [`docs/superpowers/plans/2026-09-26-phase-3-browsing.md`](docs/superpowers/plans/2026-09-26-phase-3-browsing.md)
+- Phase 4 plan: [`docs/superpowers/plans/2026-09-27-phase-4-editing.md`](docs/superpowers/plans/2026-09-27-phase-4-editing.md)

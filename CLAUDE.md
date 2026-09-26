@@ -88,7 +88,13 @@ Never a raw palette class like `bg-zinc-900`. A theme is exactly one block of `-
 
 **Button cursors**: Tailwind v4's Preflight resets buttons to `cursor: default`. `site/src/index.css` restores `cursor: pointer` for non-disabled buttons and `[role="button"]` in one base rule; don't add `cursor-pointer` per button.
 
-**Mutations must gate on `ctx.require_write()`**: there are no mutation resolvers yet (the schema uses `EmptyMutation`). When phase 4 adds them, every mutation resolver calls `ctx.require_write()?` first; `Actor::Anonymous` can write in v1 and auth later fills the actor.
+**Mutations gate on `ctx.require_write()`**: all eleven `Mutation` resolvers (`graphql/mutation.rs`) call it first, before any input is parsed; a `Role::ReadOnly` actor gets `Forbidden` and no row changes. `Actor::Anonymous` can write in v1; auth later fills the actor.
+
+**Frontend refetch and eviction**: every mutation hook builds on `useRefetchingMutation` (`hooks/useRefetchingMutation.ts`), which refetches `GetLocations`, `GetSummary`, `GetRootItems`, `GetEntityTypes`, `GetTags` and `GetEntity` for the affected id, and on a move also evicts the old and new parent `Entity:<id>` cache entries before `cache.gc()`.
+
+**`EntityForm` is shared** (`components/EntityForm.tsx`) between create and edit, keyed by the entity's id in edit mode so a different entity remounts it instead of reusing stale state; parent and tags go through `LocationPicker`/`TagPicker`.
+
+**No `window.confirm`/`alert`**: every delete goes through `<ConfirmDialog>` (`role="dialog"`, labelled, focus on Cancel at open, Escape cancels). **`updateEntity` replaces every field**: the frontend always sends the full `EntityInput`; an omitted optional scalar resets to its default, and an omitted `tagIds` leaves tags alone while `[]` clears them.
 
 **`site/build/index.html` must exist before `cargo build`**: `routes.rs` embeds `site/build/` via `rust-embed` at compile time. Run `just site-placeholder` (stub) or `just build-site` (real bundle) first; both `just test` and `just cover` do this automatically.
 

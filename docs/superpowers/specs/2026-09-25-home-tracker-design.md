@@ -464,8 +464,12 @@ thumbnail, one custom field).
 | Path | Page |
 |------|------|
 | `/` | HomePage: four stat cards, then root items (phase 3) |
+| `/new` | NewEntityPage: create a parentless entity; `?type=` preselects the type |
 | `/locations/:id` | LocationPage: breadcrumb, child location cards, item list, "add item" |
+| `/locations/:id/new` | NewEntityPage: create a child of location `:id`; `?type=` preselects the type (how "Add location" differs from "Add item") |
+| `/locations/:id/edit` | EditEntityPage: the shared form, prefilled |
 | `/items/:id` | ItemPage: photo, details, tags, custom fields, edit form |
+| `/items/:id/edit` | EditEntityPage: the shared form, prefilled |
 | `/types` | EntityTypesPage: list, create/edit/delete |
 | `/tags` | TagsPage |
 | `/search?q=` | SearchPage |
