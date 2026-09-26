@@ -2,9 +2,13 @@
 //! and the actor seam that refuses a read-only caller before the body is read.
 
 use std::fs;
-use std::io::Cursor;
+use std::io::{Cursor, ErrorKind};
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{self, Body};
@@ -18,7 +22,8 @@ use home_tracker::routes::{app, app_with_actor};
 use home_tracker::svc::fixtures::{SampleIds, jpeg, seed_sample};
 use serde_json::{Value, json};
 use tempfile::TempDir;
-use tokio::io::{self, AsyncReadExt};
+use tokio::io::{self, AsyncRead, AsyncReadExt, ReadBuf};
+use tokio::time;
 use tokio_util::io::ReaderStream;
 use tower::ServiceExt;
 
@@ -229,30 +234,77 @@ async fn rejects_html_as_415_and_stores_nothing() {
     assert!(f.attachments(&f.ids.screws).await.is_empty());
 }
 
-/// A multipart body whose `file` field is a JPEG header followed by `len`
-/// bytes of padding, streamed in 64 KiB chunks with no `Content-Length`, so
-/// the limit trips mid-stream after the temp file exists.
-fn streamed_upload(entity_id: &str, len: u64) -> Request<Body> {
+/// The opening of a multipart body: a `file` field's headers and a JPEG
+/// signature, followed by `len` bytes of padding and no closing boundary.
+fn file_part(len: u64) -> impl AsyncRead + Send + 'static {
     let mut head = format!(
         "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
          filename=\"big.jpg\"\r\nContent-Type: image/jpeg\r\n\r\n"
     )
     .into_bytes();
     head.extend_from_slice(&[0xFF, 0xD8, 0xFF]);
-    let tail = format!("\r\n--{BOUNDARY}--\r\n");
-    let reader = Cursor::new(head)
-        .chain(io::repeat(0).take(len))
-        .chain(Cursor::new(tail.into_bytes()));
+    Cursor::new(head).chain(io::repeat(0).take(len))
+}
+
+/// An upload request whose body is `body`, streamed in 64 KiB chunks with no
+/// `Content-Length`.
+fn streamed_request(entity_id: &str, body: impl AsyncRead + Send + 'static) -> Request<Body> {
     Request::post(format!("/api/upload/{entity_id}"))
         .header(
             header::CONTENT_TYPE,
             format!("multipart/form-data; boundary={BOUNDARY}"),
         )
         .body(Body::from_stream(ReaderStream::with_capacity(
-            reader,
+            body,
             64 * 1024,
         )))
         .unwrap()
+}
+
+/// A complete upload of a JPEG header and `len` bytes of padding, streamed
+/// without `Content-Length`, so the limit trips mid-stream after the temp
+/// file exists.
+fn streamed_upload(entity_id: &str, len: u64) -> Request<Body> {
+    let tail = format!("\r\n--{BOUNDARY}--\r\n").into_bytes();
+    streamed_request(entity_id, file_part(len).chain(Cursor::new(tail)))
+}
+
+/// A body that records being polled and never yields: a handler that reads
+/// it hangs, and the flag says it tried.
+struct Untouchable(Arc<AtomicBool>);
+
+impl AsyncRead for Untouchable {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.0.store(true, Ordering::SeqCst);
+        Poll::Pending
+    }
+}
+
+/// A client that goes away: every read fails.
+struct Disconnected;
+
+impl AsyncRead for Disconnected {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        Poll::Ready(Err(io::Error::new(
+            ErrorKind::ConnectionReset,
+            "client went away",
+        )))
+    }
+}
+
+fn read_only() -> Actor {
+    Actor::User {
+        id: "u1".to_owned(),
+        role: Role::ReadOnly,
+    }
 }
 
 async fn json_body(response: Response) -> Value {
@@ -312,21 +364,64 @@ async fn an_upload_just_under_the_limit_is_accepted() {
 
 #[tokio::test]
 async fn read_only_actor_is_403_before_the_body_is_read() {
-    let f = Fixture::with_actor(Actor::User {
-        id: "u1".to_owned(),
-        role: Role::ReadOnly,
-    });
-    let started = Instant::now();
+    let f = Fixture::with_actor(read_only());
+    let polled = Arc::new(AtomicBool::new(false));
+    let router = app_with_actor(f.db.pool.clone(), f.data.path().to_path_buf(), read_only());
+    let request = streamed_request(&f.ids.screws, Untouchable(Arc::clone(&polled)));
 
-    let response = f
-        .upload(&f.ids.screws, photo_form(vec![0xFF; 5 * MIB]))
-        .await;
+    let response = time::timeout(Duration::from_secs(2), router.oneshot(request))
+        .await
+        .expect("the handler waited on the body")
+        .unwrap();
 
-    response.assert_status(StatusCode::FORBIDDEN);
-    assert!(!error_message(&response).is_empty());
-    assert!(started.elapsed() < Duration::from_secs(2));
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(json_body(response).await["error"].is_string());
+    assert!(!polled.load(Ordering::SeqCst), "the body was polled");
     assert_eq!(f.originals(), Vec::<String>::new());
     assert!(f.attachments(&f.ids.screws).await.is_empty());
+}
+
+#[tokio::test]
+async fn client_abort_mid_file_leaves_nothing() {
+    let f = Fixture::new();
+    // Most of the limit, so the writer still has work queued when the
+    // client goes away and a writer left running would be seen.
+    let request = streamed_request(
+        &f.ids.screws,
+        file_part(20 * MIB as u64).chain(Disconnected),
+    );
+
+    let response = f.router().oneshot(request).await.unwrap();
+
+    assert!(response.status().is_client_error(), "{}", response.status());
+    assert!(json_body(response).await["error"].is_string());
+    assert_eq!(f.originals(), Vec::<String>::new());
+    assert!(f.attachments(&f.ids.screws).await.is_empty());
+}
+
+#[tokio::test]
+async fn the_raised_limit_is_scoped_to_uploads() {
+    let f = Fixture::new();
+    // Over axum's 2 MiB default, which must still guard every other route.
+    let mut query = br#"{"query":"{ summary { totalItems } }","pad":""#.to_vec();
+    query.resize(3 * MIB, b' ');
+    query.extend_from_slice(b"\"}");
+
+    let response = f
+        .server
+        .post("/graphql")
+        .content_type("application/json")
+        .bytes(query.into())
+        .await;
+
+    // juniper_axum reports any body failure as 400, so the limit shows in
+    // the message rather than the status.
+    response.assert_status_bad_request();
+    assert!(
+        response.text().contains("length limit exceeded"),
+        "{}",
+        response.text()
+    );
 }
 
 #[tokio::test]

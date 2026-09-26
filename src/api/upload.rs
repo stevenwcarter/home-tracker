@@ -7,6 +7,10 @@
 //! rule. The body is capped at [`MAX_UPLOAD_BYTES`] on this route only, and a
 //! caller who may not write is refused before the body is read.
 //!
+//! The limit layer runs before the handler, so a request whose
+//! `Content-Length` is over the limit gets 413 even from a caller who may not
+//! write (who would otherwise get 403): the size is judged before the actor.
+//!
 //! Every error answers `{ "error": "<message>" }` with its status: 400 for a
 //! missing or duplicate `file` field or a malformed form, 403, 404 for an
 //! unknown entity, 413, 415 for a format we do not accept, 422 for an image
@@ -230,33 +234,35 @@ async fn receive(mut multipart: Multipart, originals_dir: PathBuf) -> Result<For
     })
 }
 
-/// Streams `field` into a new temp upload under `originals_dir`. The file
-/// work runs on the blocking pool, fed chunk by chunk, and is awaited even
-/// when the stream fails, so the temp file is gone before the response is.
+/// Streams `field` into a new temp upload under `originals_dir`.
+///
+/// The file work runs on the blocking pool, fed chunk by chunk. A stream
+/// error (a client that goes away, or the body limit tripping) is forwarded
+/// to the writer, which then drops the temp file (removing it) without
+/// flushing or syncing it. The writer is always awaited, so the temp file is
+/// gone before the response is.
+///
+/// Each upload in flight holds one blocking-pool thread for as long as the
+/// client takes to send it: acceptable for a household LAN app without auth,
+/// where concurrent uploads are few.
 async fn stage(mut field: Field<'_>, originals_dir: PathBuf) -> Result<Staged, UploadFailure> {
-    let (tx, mut rx) = mpsc::channel::<Bytes>(CHUNKS_IN_FLIGHT);
+    let (tx, mut rx) = mpsc::channel::<Result<Bytes, MultipartError>>(CHUNKS_IN_FLIGHT);
     let writer = task::spawn_blocking(move || {
         let mut temp = TempUpload::create(&originals_dir)?;
         while let Some(chunk) = rx.blocking_recv() {
-            temp.write(&chunk)?;
+            temp.write(&chunk?)?;
         }
-        temp.finish()
+        Ok::<_, UploadFailure>(temp.finish()?)
     });
-    let streamed = async {
-        while let Some(chunk) = field.chunk().await? {
-            // A closed channel means the writer failed; awaiting it says why.
-            if tx.send(chunk).await.is_err() {
-                break;
-            }
+    while let Some(item) = field.chunk().await.transpose() {
+        let failed = item.is_err();
+        // A closed channel means the writer failed; awaiting it says why.
+        if tx.send(item).await.is_err() || failed {
+            break;
         }
-        Ok::<_, MultipartError>(())
     }
-    .await;
     drop(tx);
-    let staged = writer.await.context("the upload writer failed")??;
-    // On a stream error, dropping `staged` here removes the temp file.
-    streamed?;
-    Ok(staged)
+    writer.await.context("the upload writer failed")?
 }
 
 /// `primary` is read leniently: `true`, `1`, `on` (an HTML checkbox) and

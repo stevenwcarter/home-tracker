@@ -443,7 +443,9 @@ thumbnail, one custom field).
   pregeneration job will call.
 - Uploads (phase 5): multipart to `/api/upload/{entityId}`, streamed to a temp
   file while hashing, moved into `originals/`, row inserted, first photo on an
-  entity becomes primary automatically.
+  entity becomes primary automatically. The body limit runs before the
+  handler, so an over-limit `Content-Length` is 413 even for a caller who may
+  not write; otherwise a read-only caller gets 403 before the body is read.
 
 ## 10. Authentication readiness
 

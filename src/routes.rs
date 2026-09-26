@@ -73,8 +73,9 @@ pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) 
     routes(pool, thumbnails).layer(middleware::from_fn(attach_actor))
 }
 
-/// [`app`] with every request made by `actor` instead of the one
-/// [`attach_actor`] would attach, for tests of what a read-only user may do.
+/// Test support: [`app`] with every request made by `actor` instead of the
+/// one [`attach_actor`] would attach, for tests of what a read-only user may
+/// do. Production uses [`app`].
 pub fn app_with_actor(pool: SqlitePool, data_dir: PathBuf, actor: Actor) -> Router {
     let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
     routes(pool, thumbnails).layer(Extension(actor))
