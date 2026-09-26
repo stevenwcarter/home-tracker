@@ -327,3 +327,156 @@ export const TEST_AI_CONNECTION = gql`
     }
   }
 `;
+
+const INGEST_PHOTO_FIELDS = gql`
+  fragment IngestPhotoFields on IngestPhoto {
+    id
+    position
+    status
+    error
+    title
+    mimeType
+    sizeBytes
+    url
+    thumbnailUrl(size: 300)
+    suggestedKind
+    summary
+    text
+  }
+`;
+
+const INGEST_ITEM_FIELDS = gql`
+  fragment IngestItemFields on IngestItem {
+    id
+    position
+    status
+    error
+    entityId
+    suggestion {
+      name
+      description
+      manufacturer
+      modelNumber
+      serialNumber
+      quantity
+      purchaseDate
+      purchaseFrom
+      purchasePriceCents
+      warrantyExpires
+      lifetimeWarranty
+      warrantyDetails
+      notes
+      tagNames
+      confidence
+      reasoning
+    }
+    photos {
+      ...IngestPhotoFields
+    }
+  }
+  ${INGEST_PHOTO_FIELDS}
+`;
+
+const INGEST_BATCH_FIELDS = gql`
+  fragment IngestBatchFields on IngestBatch {
+    id
+    parentId
+    status
+    createdAt
+    updatedAt
+    items {
+      ...IngestItemFields
+    }
+  }
+  ${INGEST_ITEM_FIELDS}
+`;
+
+export const GET_INGEST_BATCH = gql`
+  query GetIngestBatch($id: ID!) {
+    ingestBatch(id: $id) {
+      ...IngestBatchFields
+    }
+  }
+  ${INGEST_BATCH_FIELDS}
+`;
+
+export const GET_OPEN_INGEST_BATCHES = gql`
+  query GetOpenIngestBatches($parentId: ID) {
+    openIngestBatches(parentId: $parentId) {
+      ...IngestBatchFields
+    }
+  }
+  ${INGEST_BATCH_FIELDS}
+`;
+
+export const CREATE_INGEST_BATCH = gql`
+  mutation CreateIngestBatch($parentId: ID) {
+    createIngestBatch(parentId: $parentId) {
+      ...IngestBatchFields
+    }
+  }
+  ${INGEST_BATCH_FIELDS}
+`;
+
+export const ADD_INGEST_ITEM = gql`
+  mutation AddIngestItem($batchId: ID!) {
+    addIngestItem(batchId: $batchId) {
+      ...IngestItemFields
+    }
+  }
+  ${INGEST_ITEM_FIELDS}
+`;
+
+export const REMOVE_INGEST_ITEM = gql`
+  mutation RemoveIngestItem($id: ID!) {
+    removeIngestItem(id: $id)
+  }
+`;
+
+export const REMOVE_INGEST_PHOTO = gql`
+  mutation RemoveIngestPhoto($id: ID!) {
+    removeIngestPhoto(id: $id)
+  }
+`;
+
+export const SUBMIT_INGEST_BATCH = gql`
+  mutation SubmitIngestBatch($id: ID!) {
+    submitIngestBatch(id: $id) {
+      ...IngestBatchFields
+    }
+  }
+  ${INGEST_BATCH_FIELDS}
+`;
+
+export const RETRY_INGEST_ITEM = gql`
+  mutation RetryIngestItem($id: ID!) {
+    retryIngestItem(id: $id) {
+      ...IngestItemFields
+    }
+  }
+  ${INGEST_ITEM_FIELDS}
+`;
+
+export const ACCEPT_INGEST_ITEM = gql`
+  mutation AcceptIngestItem($id: ID!, $input: EntityInput!, $photoKinds: [IngestPhotoKindInput!]!) {
+    acceptIngestItem(id: $id, input: $input, photoKinds: $photoKinds) {
+      ...EntityDetailFields
+    }
+  }
+  ${ENTITY_DETAIL_FIELDS}
+`;
+
+export const SKIP_INGEST_ITEM = gql`
+  mutation SkipIngestItem($id: ID!) {
+    skipIngestItem(id: $id) {
+      ...IngestItemFields
+    }
+  }
+  ${INGEST_ITEM_FIELDS}
+`;
+
+export const DELETE_INGEST_BATCH = gql`
+  mutation DeleteIngestBatch($id: ID!) {
+    deleteIngestBatch(id: $id)
+  }
+`;

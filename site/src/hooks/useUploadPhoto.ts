@@ -7,6 +7,17 @@ import { refetchAfterWrite } from './useRefetchingMutation';
 /** The queries a new photo can change: the open page, list thumbnails and the summary. */
 const REFETCH_AFTER_UPLOAD = ['GetEntity', 'GetSummary', 'GetRootItems', 'GetLocations'] as const;
 
+/** A staged photo changes only its batch: nothing outside the batch sees it until accepted. */
+const REFETCH_AFTER_STAGING = ['GetIngestBatch'] as const;
+
+/**
+ * Where uploaded photos go: onto an entity as attachments (`/api/upload/{id}`),
+ * or staged on an AI ingest item (`/api/ingest/items/{id}/photos`).
+ */
+export type UploadTarget =
+  | { kind: 'entity'; entity: { id: string; parentId: string | null } }
+  | { kind: 'ingestItem'; itemId: string };
+
 export type UploadStatus = 'queued' | 'uploading' | 'done' | 'error';
 
 /** Where one file of the current batch stands; `error` is set only with status `error`. */
@@ -24,7 +35,7 @@ export interface UploadResult {
 }
 
 export interface UploadOptions {
-  /** Make the first file of the batch the entity's primary photo. */
+  /** Make the first file of the batch the entity's primary photo; ignored for an ingest item. */
   primary?: boolean;
 }
 
@@ -41,11 +52,17 @@ const serverError = async (response: Response): Promise<string | null> => {
   return null;
 };
 
+/** The endpoint an upload to an entity (`isEntity`) or an ingest item `id` posts to. */
+const uploadUrl = (isEntity: boolean, id: string): string =>
+  isEntity
+    ? `/api/upload/${encodeURIComponent(id)}`
+    : `/api/ingest/items/${encodeURIComponent(id)}/photos`;
+
 /**
  * Posts one file; resolves to its result and never rejects. A file over the
  * size cap is refused here without a request (see `preflightError`).
  */
-const postPhoto = async (entityId: string, file: File, primary: boolean): Promise<UploadResult> => {
+const postPhoto = async (url: string, file: File, primary: boolean): Promise<UploadResult> => {
   const refused = preflightError(file);
   if (refused) return { file, ok: false, error: refused };
   const form = new FormData();
@@ -53,7 +70,7 @@ const postPhoto = async (entityId: string, file: File, primary: boolean): Promis
   if (primary) form.append('primary', 'true');
   let response: Response;
   try {
-    response = await fetch(`/api/upload/${encodeURIComponent(entityId)}`, {
+    response = await fetch(url, {
       method: 'POST',
       body: form,
     });
@@ -69,26 +86,32 @@ const postPhoto = async (entityId: string, file: File, primary: boolean): Promis
 };
 
 /**
- * Uploads photos to `entity` through `POST /api/upload/{id}` (plain `fetch`,
- * not Apollo: the endpoint is multipart, not GraphQL).
+ * Uploads photos to `target` (plain `fetch`, not Apollo: the endpoints are
+ * multipart, not GraphQL): an entity's `POST /api/upload/{id}`, or an ingest
+ * item's `POST /api/ingest/items/{id}/photos`.
  *
  * `upload(files, { primary })` sends one request per file, strictly one after
- * another, so the backend's "first photo becomes primary" rule sees them in
- * order; `primary` asks for the first file to become primary. It resolves to
- * one result per file and never rejects; each failure is also toasted. Once
- * the batch ends, if anything was stored, it applies the shared refetch policy
- * (`refetchAfterWrite`): the entity and its parent are evicted, and
- * `GetEntity`, `GetSummary`, `GetRootItems` and `GetLocations` are refetched
- * when mounted or evicted when not.
+ * another, so the backend's "first photo becomes primary" rule (and an ingest
+ * item's photo order) sees them in order; `primary` asks for the first file
+ * to become an entity's primary photo. It resolves to one result per file and
+ * never rejects; each failure is also toasted. Once the batch ends, if
+ * anything was stored, it applies the shared refetch policy
+ * (`refetchAfterWrite`): for an entity, the entity and its parent are evicted,
+ * and `GetEntity`, `GetSummary`, `GetRootItems` and `GetLocations` are
+ * refetched when mounted or evicted when not; for an ingest item, only
+ * `GetIngestBatch`.
  *
  * `progress` holds the latest batch's per-file status. `fetch` cannot observe
  * upload bytes, so it is a status, not a percentage.
  */
-export const useUploadPhoto = (entity: { id: string; parentId: string | null }) => {
+export const useUploadPhoto = (target: UploadTarget) => {
   const client = useApolloClient();
   const [progress, setProgress] = useState<UploadProgress[]>([]);
   const [uploading, setUploading] = useState(false);
-  const { id, parentId } = entity;
+  // Primitives, so an inline `target` object doesn't give `upload` a new identity per render.
+  const isEntity = target.kind === 'entity';
+  const id = isEntity ? target.entity.id : target.itemId;
+  const parentId = isEntity ? target.entity.parentId : null;
 
   const upload = useCallback(
     async (files: File[], options: UploadOptions = {}): Promise<UploadResult[]> => {
@@ -102,7 +125,8 @@ export const useUploadPhoto = (entity: { id: string; parentId: string | null }) 
       try {
         for (const [index, file] of files.entries()) {
           mark(index, { status: 'uploading' });
-          const result = await postPhoto(id, file, index === 0 && options.primary === true);
+          const primary = isEntity && index === 0 && options.primary === true;
+          const result = await postPhoto(uploadUrl(isEntity, id), file, primary);
           results.push(result);
           if (result.ok) {
             mark(index, { status: 'done' });
@@ -114,14 +138,17 @@ export const useUploadPhoto = (entity: { id: string; parentId: string | null }) 
         if (results.some((result) => result.ok)) {
           // A failed refetch is the query's own error to show (its hook toasts
           // it); the photos are stored, so `upload` still reports success.
-          await refetchAfterWrite(client, REFETCH_AFTER_UPLOAD, [id, parentId]).catch(() => {});
+          const refetched = isEntity
+            ? refetchAfterWrite(client, REFETCH_AFTER_UPLOAD, [id, parentId])
+            : refetchAfterWrite(client, REFETCH_AFTER_STAGING, []);
+          await refetched.catch(() => {});
         }
       } finally {
         setUploading(false);
       }
       return results;
     },
-    [client, id, parentId],
+    [client, isEntity, id, parentId],
   );
 
   return { upload, uploading, progress };

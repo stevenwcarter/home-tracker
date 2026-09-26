@@ -11,6 +11,8 @@ const TOO_LARGE_MESSAGE = 'File is larger than 25 MB';
 
 /** The upload statuses whose message is fixed here rather than taken from the server. */
 const FIXED_MESSAGES: Readonly<Record<number, string>> = {
+  // Only the ingest staging upload answers 409: its batch was submitted or finished.
+  409: 'This batch is no longer collecting photos',
   413: TOO_LARGE_MESSAGE,
   415: 'Only JPEG, PNG, GIF and WebP images are supported',
   422: 'That file is not a readable image',
@@ -20,8 +22,9 @@ const FIXED_MESSAGES: Readonly<Record<number, string>> = {
 export const NETWORK_ERROR_MESSAGE = 'Could not reach the server';
 
 /**
- * The message for a failed `POST /api/upload/{id}`: a fixed, friendly one for
- * the too-big / wrong-format / unreadable statuses, else the server's own
+ * The message for a failed `POST /api/upload/{id}` or
+ * `/api/ingest/items/{id}/photos`: a fixed, friendly one for the too-big /
+ * wrong-format / unreadable / batch-closed statuses, else the server's own
  * `{ "error": ... }` text, else the bare status.
  */
 export function uploadErrorMessage(status: number, serverMessage: string | null): string {

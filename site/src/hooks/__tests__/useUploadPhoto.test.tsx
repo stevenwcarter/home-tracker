@@ -4,10 +4,12 @@ import { MockedProvider } from '@apollo/client/testing/react';
 import type { MockedResponse } from '@apollo/client/testing';
 import { InMemoryCache } from '@apollo/client';
 import React from 'react';
-import { useUploadPhoto, UploadResult } from '../useUploadPhoto';
+import { useUploadPhoto, UploadResult, UploadTarget } from '../useUploadPhoto';
 import { useEntity } from '../useEntity';
 import { useSummary } from '../useSummary';
-import { GET_ENTITY, GET_ROOT_ITEMS } from '../queries';
+import { useQuery } from '@apollo/client/react';
+import { GET_ENTITY, GET_INGEST_BATCH, GET_ROOT_ITEMS } from '../queries';
+import { ingestBatch, ingestItem, ingestPhoto } from 'test/ingestFixtures';
 import { entityDetail, listItem, SUMMARY } from 'test/entityFixtures';
 import { REFETCHED_SUMMARY, summaryMocks } from 'test/mutationHarness';
 
@@ -49,7 +51,7 @@ const answerUploads = (respond: (n: number) => Response | Promise<Response>) => 
   return { forms, urls };
 };
 
-const DRILL = { id: 'drill', parentId: 'garage' };
+const DRILL_TARGET: UploadTarget = { kind: 'entity', entity: { id: 'drill', parentId: 'garage' } };
 
 const render = <T,>(useHook: () => T, mocks: MockedResponse[] = [], cache = new InMemoryCache()) =>
   renderHook(useHook, {
@@ -67,7 +69,7 @@ describe('useUploadPhoto', () => {
       if (n === 0) await new Promise<void>((resolve) => (release = resolve));
       return json(201, created(`p${n}`));
     });
-    const { result } = render(() => useUploadPhoto(DRILL));
+    const { result } = render(() => useUploadPhoto(DRILL_TARGET));
     const files = [jpeg('front.jpg'), jpeg('side.jpg')];
 
     let pending: Promise<UploadResult[]> | undefined;
@@ -97,7 +99,7 @@ describe('useUploadPhoto', () => {
 
   it('sends no primary field without the option', async () => {
     const { forms } = answerUploads(() => json(201, created('p0')));
-    const { result } = render(() => useUploadPhoto(DRILL));
+    const { result } = render(() => useUploadPhoto(DRILL_TARGET));
     await act(async () => {
       await result.current.upload([jpeg('front.jpg')]);
     });
@@ -111,7 +113,7 @@ describe('useUploadPhoto', () => {
     [404, 'entity not found'],
   ])('maps a %i to "%s", reports it per file and toasts it', async (status, message) => {
     answerUploads(() => json(status, { error: 'entity not found' }));
-    const { result } = render(() => useUploadPhoto(DRILL));
+    const { result } = render(() => useUploadPhoto(DRILL_TARGET));
     const file = jpeg('big.jpg');
     let results: UploadResult[] = [];
     await act(async () => {
@@ -126,7 +128,7 @@ describe('useUploadPhoto', () => {
     // The server's 413 for an oversized body arrives before the body is read,
     // so a browser sees a reset connection instead: the cap is checked here.
     const { forms } = answerUploads(() => json(201, created('p1')));
-    const { result } = render(() => useUploadPhoto(DRILL));
+    const { result } = render(() => useUploadPhoto(DRILL_TARGET));
     const big = jpeg('huge.jpg');
     Object.defineProperty(big, 'size', { value: 26 * 1024 * 1024 });
     const small = jpeg('small.jpg');
@@ -146,7 +148,7 @@ describe('useUploadPhoto', () => {
 
   it("passes a 403's server message through", async () => {
     answerUploads(() => json(403, { error: 'this instance is read-only' }));
-    const { result } = render(() => useUploadPhoto(DRILL));
+    const { result } = render(() => useUploadPhoto(DRILL_TARGET));
     const file = jpeg('a.jpg');
     let results: UploadResult[] = [];
     await act(async () => {
@@ -158,7 +160,7 @@ describe('useUploadPhoto', () => {
 
   it('falls back to the status when the error body is not JSON', async () => {
     answerUploads(() => new Response('<html>Bad gateway</html>', { status: 502 }));
-    const { result } = render(() => useUploadPhoto(DRILL));
+    const { result } = render(() => useUploadPhoto(DRILL_TARGET));
     let results: UploadResult[] = [];
     await act(async () => {
       results = await result.current.upload([jpeg('a.jpg')]);
@@ -171,7 +173,7 @@ describe('useUploadPhoto', () => {
       if (n === 0) throw new TypeError('Failed to fetch');
       return json(201, created('p1'));
     });
-    const { result } = render(() => useUploadPhoto(DRILL));
+    const { result } = render(() => useUploadPhoto(DRILL_TARGET));
     const files = [jpeg('a.jpg'), jpeg('b.jpg')];
     let results: UploadResult[] = [];
     await act(async () => {
@@ -189,7 +191,7 @@ describe('useUploadPhoto', () => {
       await new Promise<void>((resolve) => releases.push(resolve));
       return n === 0 ? json(201, created('p0')) : json(415, { error: 'nope' });
     });
-    const { result } = render(() => useUploadPhoto(DRILL));
+    const { result } = render(() => useUploadPhoto(DRILL_TARGET));
     const files = [jpeg('a.jpg'), jpeg('b.jpg')];
     expect(result.current.uploading).toBe(false);
     expect(result.current.progress).toEqual([]);
@@ -243,7 +245,7 @@ describe('useUploadPhoto', () => {
     });
     const { mocks, refetched } = summaryMocks();
     const { result } = render(
-      () => ({ hook: useUploadPhoto(DRILL), summary: useSummary().summary }),
+      () => ({ hook: useUploadPhoto(DRILL_TARGET), summary: useSummary().summary }),
       mocks,
       cache,
     );
@@ -272,7 +274,7 @@ describe('useUploadPhoto', () => {
     const after = { ...before, attachments: [photo], primaryPhoto: photo };
     const drillRefetch = vi.fn(() => ({ data: { entity: after } }));
     const { result } = render(
-      () => ({ hook: useUploadPhoto(DRILL), entity: useEntity('drill').entity }),
+      () => ({ hook: useUploadPhoto(DRILL_TARGET), entity: useEntity('drill').entity }),
       [
         {
           request: { query: GET_ENTITY, variables: { id: 'drill' } },
@@ -301,7 +303,7 @@ describe('useUploadPhoto', () => {
     });
     const { mocks, refetched } = summaryMocks();
     const { result } = render(
-      () => ({ hook: useUploadPhoto(DRILL), summary: useSummary().summary }),
+      () => ({ hook: useUploadPhoto(DRILL_TARGET), summary: useSummary().summary }),
       mocks,
       cache,
     );
@@ -319,7 +321,7 @@ describe('useUploadPhoto', () => {
     // The refetch gets a network error instead of the second summary.
     mocks[1] = { request: mocks[1].request, error: new Error('offline') };
     const { result } = render(
-      () => ({ hook: useUploadPhoto(DRILL), summary: useSummary().summary }),
+      () => ({ hook: useUploadPhoto(DRILL_TARGET), summary: useSummary().summary }),
       mocks,
     );
     await waitFor(() => expect(result.current.summary).toEqual(SUMMARY));
@@ -330,5 +332,108 @@ describe('useUploadPhoto', () => {
     });
     expect(results).toEqual([{ file, ok: true }]);
     expect(result.current.hook.uploading).toBe(false);
+  });
+});
+
+describe('useUploadPhoto for an ingest item', () => {
+  const TARGET: UploadTarget = { kind: 'ingestItem', itemId: 'item 1' };
+  const staged = (id: string) => ({
+    id,
+    position: 0,
+    status: 'PENDING',
+    title: `${id}.jpg`,
+    mimeType: 'image/jpeg',
+    sizeBytes: 10,
+    url: `/ingest/photos/${id}?v=abc`,
+    thumbnailUrl: `/ingest/photos/${id}/thumb/300?v=abc`,
+  });
+  const before = ingestBatch({ id: 'b1', items: [ingestItem({ id: 'item 1' })] });
+  const after = ingestBatch({
+    id: 'b1',
+    items: [ingestItem({ id: 'item 1', photos: [ingestPhoto({ id: 's0' })] })],
+  });
+  const batchMocks = () => {
+    const refetched = vi.fn(() => ({ data: { ingestBatch: after } }));
+    const mocks: MockedResponse[] = [
+      {
+        request: { query: GET_INGEST_BATCH, variables: { id: 'b1' } },
+        result: { data: { ingestBatch: before } },
+      },
+      { request: { query: GET_INGEST_BATCH, variables: { id: 'b1' } }, result: refetched },
+    ];
+    return { mocks, refetched };
+  };
+  const useBatch = () =>
+    useQuery<{ ingestBatch: typeof before }>(GET_INGEST_BATCH, { variables: { id: 'b1' } }).data
+      ?.ingestBatch;
+
+  it('posts each file to the staging URL, never with a primary field', async () => {
+    const { forms, urls } = answerUploads((n) => json(201, staged(`s${n}`)));
+    const { result } = render(() => useUploadPhoto(TARGET));
+    const files = [jpeg('front.jpg'), jpeg('receipt.jpg')];
+    let results: UploadResult[] = [];
+    await act(async () => {
+      results = await result.current.upload(files, { primary: true });
+    });
+    expect(urls).toEqual([
+      '/api/ingest/items/item%201/photos',
+      '/api/ingest/items/item%201/photos',
+    ]);
+    expect(forms.map((form) => form.get('file'))).toEqual(files);
+    expect(forms.map((form) => form.get('primary'))).toEqual([null, null]);
+    expect(results.map((entry) => entry.ok)).toEqual([true, true]);
+  });
+
+  it('refetches the open batch, and not the entity queries', async () => {
+    answerUploads(() => json(201, staged('s0')));
+    const batch = batchMocks();
+    const summary = summaryMocks();
+    const { result } = render(
+      () => ({
+        hook: useUploadPhoto(TARGET),
+        batch: useBatch(),
+        summary: useSummary().summary,
+      }),
+      [...batch.mocks, ...summary.mocks],
+    );
+    await waitFor(() => expect(result.current.batch).toBeDefined());
+    await waitFor(() => expect(result.current.summary).toEqual(SUMMARY));
+
+    await act(async () => {
+      await result.current.hook.upload([jpeg('front.jpg')]);
+    });
+
+    expect(batch.refetched).toHaveBeenCalledTimes(1);
+    expect(result.current.batch?.items[0].photos).toHaveLength(1);
+    expect(summary.refetched).not.toHaveBeenCalled();
+  });
+
+  it('evicts the cached batch when no batch query is mounted', async () => {
+    answerUploads(() => json(201, staged('s0')));
+    const cache = new InMemoryCache();
+    cache.writeQuery({
+      query: GET_INGEST_BATCH,
+      variables: { id: 'b1' },
+      data: { ingestBatch: before },
+    });
+    const { result } = render(() => useUploadPhoto(TARGET), [], cache);
+    expect(Object.keys(cache.extract().ROOT_QUERY ?? {})).toContain('ingestBatch({"id":"b1"})');
+    await act(async () => {
+      await result.current.upload([jpeg('front.jpg')]);
+    });
+    expect(Object.keys(cache.extract().ROOT_QUERY ?? {})).not.toContain('ingestBatch({"id":"b1"})');
+  });
+
+  it('shows a 409 as the batch no longer collecting', async () => {
+    answerUploads(() => json(409, { error: 'batch is processing' }));
+    const { result } = render(() => useUploadPhoto(TARGET));
+    let results: UploadResult[] = [];
+    await act(async () => {
+      results = await result.current.upload([jpeg('late.jpg')]);
+    });
+    expect(results[0].error).toBe('This batch is no longer collecting photos');
+    expect(toast.error).toHaveBeenCalledWith(
+      'Could not upload late.jpg: This batch is no longer collecting photos',
+    );
   });
 });

@@ -26,6 +26,8 @@ const ROOT_FIELDS: Readonly<Record<string, string>> = {
   GetEntityTypes: 'entityTypes',
   GetTags: 'tags',
   GetAiSettings: 'aiSettings',
+  GetIngestBatch: 'ingestBatch',
+  GetOpenIngestBatches: 'openIngestBatches',
 };
 
 type EntityIds = ReadonlyArray<string | null | undefined>;

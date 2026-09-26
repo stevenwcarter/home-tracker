@@ -28,6 +28,7 @@ export default defineConfig(() => ({
       '/graphql': proxied,
       '/graphiql': proxied,
       '/attachments/': proxied,
+      '/ingest/photos/': proxied,
       '/api/': proxied,
     },
   },

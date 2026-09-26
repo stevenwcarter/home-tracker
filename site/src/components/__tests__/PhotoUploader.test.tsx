@@ -2,21 +2,21 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { fireEvent, render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { PhotoUploader } from '../PhotoUploader';
-import type { UploadProgress } from 'hooks/useUploadPhoto';
+import type { UploadProgress, UploadTarget } from 'hooks/useUploadPhoto';
 
 const upload = vi.fn(async () => []);
 const hookState: { uploading: boolean; progress: UploadProgress[] } = {
   uploading: false,
   progress: [],
 };
-const useUploadPhoto = vi.fn((entity: { id: string; parentId: string | null }) => {
-  void entity;
+const useUploadPhoto = vi.fn((target: UploadTarget) => {
+  void target;
   return { upload, ...hookState };
 });
 vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
 import { toast } from 'react-toastify';
 vi.mock('hooks/useUploadPhoto', () => ({
-  useUploadPhoto: (entity: { id: string; parentId: string | null }) => useUploadPhoto(entity),
+  useUploadPhoto: (target: UploadTarget) => useUploadPhoto(target),
 }));
 
 beforeEach(() => {
@@ -25,18 +25,18 @@ beforeEach(() => {
   hookState.progress = [];
 });
 
-const DRILL = { id: 'drill', parentId: 'garage' };
+const DRILL: UploadTarget = { kind: 'entity', entity: { id: 'drill', parentId: 'garage' } };
 const jpeg = (name: string) => new File(['jpeg'], name, { type: 'image/jpeg' });
 
 const renderUploader = () =>
   render(
-    <PhotoUploader entity={DRILL}>
+    <PhotoUploader target={DRILL}>
       <p>gallery goes here</p>
     </PhotoUploader>,
   );
 
 describe('PhotoUploader', () => {
-  it('uploads for the given entity', () => {
+  it('uploads to the given target', () => {
     renderUploader();
     expect(useUploadPhoto).toHaveBeenCalledWith(DRILL);
     expect(screen.getByText('gallery goes here')).toBeInTheDocument();

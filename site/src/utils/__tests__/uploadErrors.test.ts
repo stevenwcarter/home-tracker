@@ -6,6 +6,7 @@ describe('uploadErrorMessage', () => {
     [413, 'File is larger than 25 MB'],
     [415, 'Only JPEG, PNG, GIF and WebP images are supported'],
     [422, 'That file is not a readable image'],
+    [409, 'This batch is no longer collecting photos'],
   ])('maps %i to the fixed message, whatever the server said', (status, message) => {
     expect(uploadErrorMessage(status, 'something else')).toBe(message);
     expect(uploadErrorMessage(status, null)).toBe(message);

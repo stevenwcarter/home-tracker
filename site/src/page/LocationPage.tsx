@@ -90,7 +90,7 @@ export const LocationPage = () => {
       <Section title="Photos">
         {/* Keyed: the route reuses this page for another id, so an unkeyed
             uploader would carry its status (or running batch) to that entity. */}
-        <PhotoUploader key={entity.id} entity={entity}>
+        <PhotoUploader key={entity.id} target={{ kind: 'entity', entity }}>
           <PhotoGallery key={entity.id} photos={entity.attachments.filter(isGalleryPhoto)} />
         </PhotoUploader>
       </Section>
