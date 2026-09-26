@@ -8,8 +8,9 @@ and a home page with four statistic cards. Phase 2 added the full inventory
 schema, a GraphQL query surface over it, and an importer that reads a Homebox
 backup so the app can run on real data. Phases 3 and 4 added browsing and
 editing, phase 5 added photo uploads with a gallery on every entity page,
-and phase 6 adds a settings screen where an OpenAI-compatible model is
-configured for the AI item ingest that follows.
+phase 6 added a settings screen where an OpenAI-compatible model is
+configured, and phase 7 uses that model to turn photos into prefilled item
+records you review before saving (see Adding items with AI).
 
 ## Run with Docker
 
@@ -237,6 +238,97 @@ body is logged at `warn`, cut to 500 characters, with the key masked. The
 full key never appears; OpenAI's own error bodies may echo a masked
 fragment (such as `sk-proj-****cdef`), which we also mask.
 
+## Adding items with AI
+
+Once an API key is set (Settings, or `OPENAI_API_KEY`), every location and
+item page has an **Add item(s) with AI** button; without a key it shows a
+muted "Set up AI" link to the settings tab instead. The button starts a
+batch whose items will land under that page's entity and opens
+`/ingest/<batchId>`.
+
+1. **Group photos by item.** The batch starts with one empty group, Item 1.
+   Add photos of one thing to it: the item itself, its label or serial
+   plate, the receipt, the warranty card. **Add photos** picks files (several
+   at once); **Take photo** opens the phone's camera. Each photo shows up
+   as a thumbnail with its own remove button.
+2. **Next item** adds the next empty group, Item 2, and so on. **Remove
+   item** drops a group (after a confirmation if it has photos). **Discard
+   batch** throws the whole batch away.
+3. **Submit for analysis** sends the batch off. It is enabled once any
+   photo is in and waits while uploads are still running; empty groups are
+   dropped.
+4. **Live progress.** A strip of chips shows each item as Queued,
+   Analysing, Ready or Failed, updated live over a server-sent event stream.
+   You can start reviewing as soon as the first item is ready.
+5. **Review.** The first ready item opens with its photos, a kind picker
+   for each one (Photo, Receipt, Warranty, Manual, Other; preset from
+   what the model thought it was) and a "What the AI saw" panel with the
+   model's summary and the text it read. Below that, the model's confidence
+   and reasoning, then the usual item form prefilled with its suggestion:
+   name, description, manufacturer, model and serial numbers, quantity,
+   purchase and warranty details, notes, and tags (existing tags only).
+   Nothing is saved yet; change whatever is wrong, including where the item
+   goes.
+6. **Save item or Skip.** Save item creates the item with your values and
+   attaches the photos with the kinds you chose; the first photo of kind
+   Photo becomes its primary photo. Skip sets the item aside and deletes its
+   staged photos. A failed item shows why, with **Retry** (runs the
+   analysis again for that item) and Skip. The review moves on to the next
+   item by itself.
+7. **Add more.** When every item is saved or skipped, the batch is done: a
+   summary links the saved items and offers **Add more items** (a new batch
+   under the same place) and a way back.
+
+Leaving the page loses nothing: the batch lives on the server, a reload
+lands back on it, and the location or item page lists unfinished batches as
+**Resume batch** links.
+
+**What the model sees.** Never an original. For each photo the server sends
+the 1200px WebP rendition (the same one the viewer uses) with the vision
+model's prompt, and gets back a short description, the text it can read and
+a guess at the photo's kind. The synthesis model then gets those
+descriptions (not the images), the fields to fill, the currency and your
+existing tag names, and answers with one suggested item. It is told to
+leave out anything the photos do not show rather than invent serials or
+prices. An answer that is not the JSON asked for fails only that photo or
+item, with a readable message, and Retry is there for it.
+
+**Limits.** Photos go through the same checks as gallery uploads: at most
+25 MiB each, JPEG, PNG, GIF or WebP, decided from the file's bytes. HEIC is
+not accepted as such, but both buttons ask the browser for `image/*`, which
+makes iPhones and most Android phones convert a HEIC photo to JPEG before
+uploading it. A photo whose bytes are already stored (say, an imported one)
+is not stored twice. Once a batch is submitted it takes no more photos.
+
+The staging endpoint is `POST /api/ingest/items/{itemId}/photos`, the same
+multipart `file` field and error statuses as `/api/upload`, plus 409 once the
+batch has been submitted; staged photos are served at `/ingest/photos/{id}`
+and `/ingest/photos/{id}/thumb/{size}`, and progress streams from
+`GET /api/ingest/batches/{id}/events`.
+
+**Abandoned batches** are deleted, with their staged photos, after 7 days
+without any activity (an upload, an edit, a save or skip); the server checks
+at startup and then every 24 hours and logs how many it removed. Saved items
+are never touched.
+
+**Restarts.** If the server stops mid-analysis, the items it was working on
+go back to the queue at the next start and the batch finishes by itself; a
+page that was open picks the stream up again and shows the current state.
+
+**Models and instructions** are set on the Settings AI tab: the vision
+model (one call per photo), the synthesis model (one call per item), and
+optional extra instructions appended to both prompts (for example "prices
+are in euros" or "our tags are room names"). At most four model calls run
+at once, across all batches.
+
+**Cost.** Each item costs one vision call per photo plus one synthesis call,
+so two items with two photos each make six calls. With the default
+`gpt-5-mini`, a vision call used about 1,650 input and 1,900 to 2,300
+output tokens (reasoning included) and took about 30 s; a synthesis call
+about 850 to 1,000 input and 1,250 output tokens in about 8 s. Photos
+of one item, and items of one batch, are analysed in parallel. Retrying an
+item repeats only the calls for photos that failed, plus its synthesis.
+
 ## Project layout
 
 ```
@@ -258,7 +350,8 @@ home-tracker/
 │   ├── graphql/        juniper: context, schema, query, objects/ (one file per type)
 │   ├── import/         Homebox backup importer: source, tables, run, report
 │   ├── ai/             OpenAI-compatible client, fake, prompts, OPENAI_* overrides
-│   ├── api/            axum handlers: graphql, attachments, upload, actor middleware
+│   ├── ingest/         AI ingest runner, lenient answer parsing, progress events
+│   ├── api/            axum handlers: graphql, attachments, upload, ingest, actor middleware
 │   ├── routes.rs       router, compression, embedded SPA, /assets cache
 │   └── healthcheck.rs
 ├── site/               Vite + React 19 + TypeScript + Apollo + Tailwind v4
@@ -284,3 +377,4 @@ home-tracker/
 - Phase 5 plan: [`docs/superpowers/plans/2026-09-28-phase-5-photos.md`](docs/superpowers/plans/2026-09-28-phase-5-photos.md)
 - AI ingest spec: [`docs/superpowers/specs/2026-09-26-ai-ingest-design.md`](docs/superpowers/specs/2026-09-26-ai-ingest-design.md)
 - Phase 6 plan: [`docs/superpowers/plans/2026-09-26-phase-6-settings-and-ai-client.md`](docs/superpowers/plans/2026-09-26-phase-6-settings-and-ai-client.md)
+- Phase 7 plan: [`docs/superpowers/plans/2026-09-26-phase-7-ai-ingest.md`](docs/superpowers/plans/2026-09-26-phase-7-ai-ingest.md)

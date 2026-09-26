@@ -220,28 +220,63 @@ Stored in `ingest_photos.description`:
 
 `submitIngestBatch` moves the batch to `processing`, each item with at least
 one photo to `queued` (items with no photos are deleted), and hands the batch
-id to the runner. The runner:
+id to the runner (`IngestRunner::spawn_batch`, after the submitting
+transaction has committed and its connection is released). Submit itself
+publishes no event: the submitting client has the mutation's answer, and the
+runner's first `item` events follow at once. The runner (`src/ingest/runner.rs`):
 
-1. For each item (parallel), for each `pending` or `failed` photo (parallel,
-   under the global semaphore): get or generate the 1200 px thumbnail, build
-   the vision request (system prompt from `prompts.rs`, extra instructions,
-   the image as a data URL), parse the description JSON, store it with
+1. For each item (a parallel task): claim it with
+   `svc::ingest::claim_for_analysis`, a conditional
+   `UPDATE … SET status = 'analysing' WHERE status = 'queued'` that also
+   clears any previous suggestion and error. An item in any other status
+   (already claimed by a racing run, accepted, skipped) is left alone, so two
+   runs never analyse one item twice. Publish `item` event.
+2. For each of its photos that is not `described` (parallel tasks, each
+   model call under the process-wide semaphore of 4, held only around the
+   call): get or generate the 1200 px WebP thumbnail, build the vision
+   request (system prompt from `prompts.rs`, extra instructions, the image
+   as a `data:image/webp;base64,…` URL with `detail: auto`), parse the
+   description JSON leniently (`ingest/parse.rs`), store it with
    `status = described` and `suggested_kind`, else `failed` with a short
-   error (no paths, no key). Publish `photo` event.
-2. When all of the item's photos have settled: if none is described, the
+   readable error (no paths, no key). A panicking or failing task fails only
+   its own photo. Publish `photo` event.
+3. When all of the item's photos have settled: if none is described, the
    item is `failed`; else build the synthesis request (all descriptions,
    the field list with types, the currency, the existing tag names), parse
-   the suggestion, filter tags, store it, item `ready`. Publish `item` event.
-3. When every item has settled: batch `reviewing`. Publish `batch` event.
+   the suggestion, filter tags to existing ones case-insensitively, store
+   it, item `ready`. No key configured fails the item with "AI is not
+   configured: add an API key first". Publish `item` event.
+4. After each item settles, `settle_batch` (inside an immediate
+   transaction, so concurrent items publish at most one change) moves the
+   batch to `reviewing` once no item is `queued`/`analysing`, and to `done`
+   once every item is `accepted`/`skipped`. Publish `batch` event only when
+   the status actually changed; close the batch's channel when it is `done`.
 
-`retryIngestItem` re-queues one `failed` (or `ready`) item and runs steps 1
-and 2 for it. Accepting or skipping the last open item moves the batch to
-`done`. `deleteIngestBatch` removes everything (files refcounted).
+The runner adds no retries of its own beyond the client's (two backoff
+retries on 429/5xx per call). A batch of N photos in M items costs N vision
+calls plus M synthesis calls.
+
+`retryIngestItem` works on a `ready` or `failed` item only (else
+`NotRetryable`, "only an item that is ready or failed can be retried"): it
+re-queues the item, clears its error, and moves a `reviewing` batch back to
+`processing` (so a restart mid-retry still finds it through the re-queue
+below); then the runner re-describes only the photos that are not
+`described` and synthesises again from all described ones, and settles the
+batch back to `reviewing`. Accept, skip and retry each publish an `item`
+event, then a `batch` event when the batch status changed, and close the
+channel when the batch is now `done`. Accepting or skipping the last open
+item moves the batch to `done`. `deleteIngestBatch` removes everything (files
+refcounted) and closes the channel.
 
 The runner holds no DB connection across a model call. Model calls run on the
 async runtime (reqwest); DB work runs in `spawn_blocking`. A server restart
-mid-batch leaves items `analysing`; on startup the runner re-queues any
-`analysing` items of `processing` batches.
+mid-batch leaves items `analysing`; on startup (after the stale-batch
+cleanup, so an abandoned batch is not resumed and then deleted) the server
+resets the `analysing` items of every `processing` batch to `queued` and
+runs each such batch again in the background. Cleanup deletes batches with
+no activity for 7 days (`updated_at`, bumped by every mutation and upload
+that touches the batch, including accept and skip) at startup and every
+24 h, logs the count, and closes the deleted batches' channels.
 
 ## 6. GraphQL
 
@@ -311,17 +346,33 @@ extend type Mutation {
 }
 ```
 
-Rules: every mutation starts with `ctx.require_write()`. `acceptIngestItem`
+Rules: there are nine ingest mutations (`createIngestBatch` through
+`deleteIngestBatch` above), and every mutation starts with
+`ctx.require_write()`. `acceptIngestItem`
 creates the entity through the existing `svc::entity::create`, then inserts
 one attachment per photo (kind from `photoKinds`, default the suggested kind
-mapped `other -> attachment`; missing entries default too), primary = first
-attachment of kind `photo` (else none), then deletes the ingest photo rows
-(files stay: the attachments share the sha). `EntityInput.parent_id` is the
+mapped `other -> attachment`, or `photo` when nothing was suggested; missing
+entries default too), primary = first attachment of kind `photo` whose MIME
+passes `is_thumbnailable` (else none), then deletes the ingest photo rows
+(files stay: the attachments share the sha), all in one immediate
+transaction. A `photoKinds` entry naming a photo of another item is refused
+(`ForeignPhoto`). `EntityInput.parent_id` is the
 user's choice; the batch's parent is only the default. `acceptIngestItem` and
-`skipIngestItem` refuse items not in `ready` or `failed`. `submitIngestBatch`
-refuses a batch with no photos at all. Mutations that touch a batch bump
+`skipIngestItem` refuse items not in `ready` or `failed`; `retryIngestItem`
+likewise (see §5). `addIngestItem`, `removeIngestItem` and
+`removeIngestPhoto` work only while the batch is `collecting`.
+`submitIngestBatch` refuses a batch with no photos at all. A refusal
+(`IngestError`: not found, not collecting, not reviewable, not retryable,
+empty, foreign photo) comes back as a field error with its own message and is
+logged at `info`, not as a server error. Mutations that touch a batch bump
 `updated_at`. `testAiConnection` loads the resolved config and releases its
 database connection before awaiting the model.
+
+The handler builds the context with `GraphQLContext::for_request(pool,
+actor, data_dir, ai, ingest)` from the router's shared `AiState` and
+`Arc<IngestRunner>`, so resolvers spawn work on the same runner (and publish
+on the same events hub) that `serve` resumes and the SSE route reads.
+`GraphQLContext::new` (tests) builds a disabled runner of its own.
 
 ## 7. HTTP endpoints
 
@@ -332,8 +383,23 @@ database connection before awaiting the model.
 | `/ingest/photos/{id}/thumb/{size}` | GET | As `/attachments/{id}/thumb/{size}`. |
 | `/api/ingest/batches/{id}/events` | GET | `text/event-stream`. Events `photo`, `item`, `batch` with data `{"id": "..."}`, plus a `ping` comment every 15 s. Exempt from compression. Ends when the batch is `done` or deleted. 404 for an unknown batch. |
 
-The attachment and ingest photo handlers share one implementation over a
-`BlobSource` (id -> `Blob` plus title/mime) so behaviour cannot drift.
+SSE rules: the handler subscribes first, then loads the batch (in
+`spawn_blocking`), so no event between the load and the subscription is
+lost. An unknown batch answers 404 (500 when the load fails) and closes the
+channel it just opened, so the hub keeps no entry for it; the client's
+`useIngestBatch` reports that as `notFound`. A batch that is already `done`
+gets exactly one `batch` event and the stream ends (the client does not
+reopen it). A receiver that lags behind the 64-event buffer gets one `batch`
+event for the batch instead of the missed ones, since every event only tells
+the client to refetch. The stream ends when the channel closes: on `done`
+(runner or review step), on `deleteIngestBatch`, and when cleanup deletes the
+batch. `publish` never opens a channel, and drops one whose last receiver is
+gone, so an unwatched batch costs nothing.
+
+The attachment and ingest photo handlers share one implementation
+(`api/blob.rs`: `serve_original`, `serve_thumb` over a `Blob`) so behaviour
+cannot drift; a test compares the two routes' header sets for the same
+bytes.
 
 ## 8. Prompts
 
@@ -349,6 +415,19 @@ serials or prices; prices in integer cents of the instance currency; tags
 only from the given list. Extra instructions are appended as a final
 paragraph of each system prompt.
 
+The user messages are built by `describe_user_message` ("Photo N of M of one
+item.", beside the image part) and `synthesis_user_message` (each described
+photo as "Photo N: <description JSON>", the currency, the tag names and the
+`SUGGESTION_FIELDS` list with types, pinned against
+`item_suggestion_schema()` by a test). Both calls ask for the §4.4/§4.5
+schemas and cap output at `DESCRIBE_MAX_TOKENS` / `SYNTHESIS_MAX_TOKENS`
+(6000 each, reasoning tokens included). The parser takes the whole answer as
+JSON first, else the first balanced `{…}` object in it (code fences, prose
+around it); a non-object, truncated or summary-less answer fails the photo
+or item with a readable `ParseError` message. Numeric strings are coerced;
+negative, fractional-cent or out-of-range numbers and bad dates are dropped
+rather than failing the item.
+
 ## 9. Frontend
 
 - **Settings**: `/settings` redirects to `/settings/ai`. `SettingsPage`
@@ -361,33 +440,58 @@ paragraph of each system prompt.
   cleared, and sends blank extra instructions as null); Test connection
   (disabled without a key) with the result inline in an `aria-live` region.
   Nav gains "Settings".
-- **Entry**: `LocationPage` and `ItemPage` show "Add item(s) with AI" when
-  `hasApiKey`, else a muted "Set up AI" link. Clicking creates a batch with
-  the page's entity as parent and navigates to `/ingest/:batchId`. If
-  `openIngestBatches(parentId)` is non-empty the page also shows "Resume
-  batch" links.
-- **`/ingest/:batchId`** (`IngestPage`) switches on the batch status:
-  - `collecting` (`IngestCollect`): item groups in order, each with its
-    photos (thumb 300, remove), "Add photos" (file input, `accept="image/*"`,
-    multiple) and "Take photo" (`capture="environment"`), the uploader's
-    per-file status list; "Next item" adds an empty group; "Remove item";
-    "Submit" enabled when any photo exists. Uploads go through
-    `useUploadPhoto` pointed at the item's staging URL.
-  - `processing`/`reviewing` (`IngestReview`): a progress strip (one chip
-    per item with its status) and the review pane for the first item in
-    `ready` or `failed` that is not yet accepted/skipped: photos strip with
-    a kind select per photo and a collapsible "What the AI saw" (summary and
-    transcribed text), `EntityForm` prefilled from the suggestion with the
-    confidence and reasoning shown above it, Save (accept) and Skip; a
-    failed item shows its error with Retry and Skip. While nothing is ready
-    yet, a waiting state.
-  - `done` (`IngestDone`): counts of saved and skipped items with links to
-    the saved entities; "Add more items" (new batch, same parent) and "Back
-    to <parent>".
+- **Entry** (`components/ingest/AiEntry.tsx`): `LocationPage` and
+  `ItemPage` show "Add item(s) with AI" when `hasApiKey`, else a muted "Set
+  up AI" link to `/settings/ai`. Clicking creates a batch with the page's
+  entity as parent and navigates to `/ingest/:batchId`, through
+  `useStartBatch` (an in-flight guard, so a double tap creates one batch).
+  If `openIngestBatches(parentId)` is non-empty the page also shows "Resume
+  batch (N items, started X ago)" links.
+- **`/ingest/:batchId`** (`IngestPage`, heading "Add items with AI",
+  breadcrumb through the parent once it has loaded) switches on the batch
+  status, and shows NotFound for an unknown or deleted batch. Items are
+  labelled by their index in the list ("Item 2"), never by `position`,
+  which keeps gaps after removals.
+  - `collecting` (`IngestCollect`, `IngestItemGroup`): item groups in
+    order, each with its photos (thumb 300 in a wrapping 3/4/6-column grid,
+    per-photo remove), "Add photos" (file input, `accept="image/*"`,
+    multiple) and "Take photo" (a second input with `capture="environment"`),
+    the uploader's per-file status list; "Next item" adds an empty group;
+    "Remove item" (immediate for an empty item, confirmed in a
+    `ConfirmDialog` for one with photos; hidden when only one item is left);
+    "Submit for analysis" enabled when any photo exists and no upload is in
+    flight (`PhotoUploader`'s `onUploadingChange`; "Waiting for uploads to
+    finish" meanwhile); "Discard batch" (confirmed, deletes the batch and
+    goes back). Uploads go through `useUploadPhoto` with an `ingestItem`
+    target (the item's staging URL, no `primary`, refetching only
+    `GetIngestBatch`). A reload lands back on the same batch with
+    everything intact, since it all lives on the server.
+  - `processing`/`reviewing` (`IngestProgress` and `IngestReview`): a
+    progress strip (`aria-live`, one chip per item, "Item N: Queued /
+    Analysing / Ready / Failed / Saved / Skipped", `aria-current` on the
+    item under review) and the review pane for `nextReviewable(batch)`,
+    the first item in `ready` or `failed`: photos strip with a "Kind of
+    photo N" select per photo (default: the suggested kind) and a
+    collapsible "What the AI saw" (summary and transcribed text),
+    "Confidence: x. reasoning" above an `EntityForm` in create mode seeded
+    via `initialInput` from `suggestionToInput` (Item type, the batch's
+    parent, tags resolved by name; the input is fixed once the type and tag
+    lookups first load, so a later `GetTags` refetch does not remount the
+    form and lose edits), "Save item" (accept) and "Skip". A failed item
+    shows its error with Retry and Skip and no form. While nothing is ready
+    yet, a waiting state "Analysing your photos…".
+  - `done` (`IngestDone`): "Saved N items, skipped M." with links to the
+    saved entities by their saved names; "Add more items" (new batch, same
+    parent, through `useStartBatch`) and "Back to <parent>" (Home when the
+    batch has no parent or it is gone).
 - Live updates: `useIngestBatch(id)` runs the query and opens an
   `EventSource` on the events URL; every event and every `open` refetches
-  the query (debounced 150 ms). After accept, the usual refetch policy runs
-  for the created entity's parent.
+  the query (one trailing refetch, debounced 150 ms). It closes the stream
+  (and does not open one) once the batch is `DONE`, because the server ends
+  a done batch's stream and a browser would otherwise reconnect forever; a
+  404 stops the browser by itself. `useIngestMutations` holds the nine
+  writes, all refetching `GetIngestBatch`/`GetOpenIngestBatches`; after
+  accept, the usual entity refetch policy runs for the chosen parent.
 - Copy: "Add item(s) with AI", "Next item", "Take photo", "Add photos",
   "Submit for analysis", "Save item", "Skip", "Retry", "Add more items".
 
