@@ -278,9 +278,9 @@ type Entity {
   assetId: String                 # "000-007" or null when 0
   quantity: Float!  insured: Boolean!
   serialNumber: String  modelNumber: String  manufacturer: String  notes: String
-  lifetimeWarranty: Boolean!  warrantyExpires: Date  warrantyDetails: String
-  purchaseDate: Date  purchaseFrom: String  purchasePriceCents: Int!
-  soldDate: Date  soldTo: String  soldPriceCents: Int!  soldNotes: String
+  lifetimeWarranty: Boolean!  warrantyExpires: LocalDate  warrantyDetails: String
+  purchaseDate: LocalDate  purchaseFrom: String  purchasePriceCents: Int!
+  soldDate: LocalDate  soldTo: String  soldPriceCents: Int!  soldNotes: String
   tags: [Tag!]!
   attachments: [Attachment!]!
   primaryPhoto: Attachment
@@ -316,9 +316,9 @@ input EntityInput {
   name: String!  description: String  entityTypeId: ID!  parentId: ID
   archived: Boolean  quantity: Float  insured: Boolean
   serialNumber: String  modelNumber: String  manufacturer: String  notes: String
-  lifetimeWarranty: Boolean  warrantyExpires: Date  warrantyDetails: String
-  purchaseDate: Date  purchaseFrom: String  purchasePriceCents: Int
-  soldDate: Date  soldTo: String  soldPriceCents: Int  soldNotes: String
+  lifetimeWarranty: Boolean  warrantyExpires: LocalDate  warrantyDetails: String
+  purchaseDate: LocalDate  purchaseFrom: String  purchasePriceCents: Int
+  soldDate: LocalDate  soldTo: String  soldPriceCents: Int  soldNotes: String
   tagIds: [ID!]
 }
 input EntityTypeInput { name: String!  description: String  icon: String  isLocation: Boolean! }
@@ -339,7 +339,7 @@ type Mutation {
 }
 ```
 
-`DateTime` and `Date` are juniper's chrono scalars. Phase 1 ships only `Summary`
+`DateTime` and `LocalDate` are juniper's chrono scalars. Phase 1 ships only `Summary`
 and `Query.summary` (dummy data); later phases add the rest.
 
 Validation rules enforced in `svc`, tested at the GraphQL seam:

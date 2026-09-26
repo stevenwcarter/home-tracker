@@ -3,9 +3,10 @@
 A self-hosted home inventory app that replaces [Homebox](https://homebox.software/)
 for a single household. One instance tracks one home: locations, items nested
 inside them, tags, and photos. There is no authentication yet; the server
-trusts every request as a writer. Phase 1 (this walking skeleton) ships the
-backend, the database, and a home page with four live statistic cards backed
-by fixed dummy numbers.
+trusts every request as a writer. Phase 1 shipped the backend, the database,
+and a home page with four statistic cards. Phase 2 adds the full inventory
+schema, a read-only GraphQL query surface over it, and an importer that reads
+a Homebox backup so the app can run on real data.
 
 ## Run with Docker
 
@@ -47,10 +48,22 @@ pre-commit hook via the root `prepare` script.
 
 ```bash
 home-tracker import backup.zip
+home-tracker import homebox-backup   # an exploded backup directory works too
 ```
 
-**Phase 2, not yet available.** In phase 1 this subcommand exits with an
-error explaining it is not implemented yet.
+Reads a Homebox export, either the zip Homebox produces or that zip already
+unzipped into a folder, and upserts it into the database: entity types,
+locations and items, tags, custom fields, and attachments with their
+thumbnails. Every row is upserted by its Homebox UUID, so re-running the
+same backup is safe: it refreshes existing rows in place and never deletes
+anything. Homebox's two built-in entity types (`global.location`,
+`global.item`) are mapped by name onto the seeded location and item types
+instead of being inserted again. Attachment blobs are content-addressed by
+SHA-256 and written to `$DATA_DIR/originals/<sha256>`; thumbnails are
+stored in the database at Homebox's original 500px size. Maintenance
+entries and notifiers are not imported; the command prints a warning for
+each one found. The command's output is a per-table count of rows
+inserted, updated, and skipped, plus any warnings.
 
 ## Project layout
 
@@ -65,8 +78,13 @@ home-tracker/
 │   ├── net.rs          dual-stack bind
 │   ├── db.rs           r2d2 pool, PRAGMAs, embedded migrations, TestDb
 │   ├── schema.rs       diesel print-schema output (generated)
-│   ├── svc/            business logic (settings, stats)
-│   ├── graphql/        juniper: context, schema, query
+│   ├── asset_id.rs     AssetId, Homebox-style "000-007" asset numbers
+│   ├── money.rs        Cents, integer-cents money
+│   ├── kinds.rs        closed string enums stored as lowercase TEXT
+│   ├── models/         Diesel Queryable/Selectable structs, one file per table
+│   ├── svc/            business logic, one file per aggregate
+│   ├── graphql/        juniper: context, schema, query, objects/ (one file per type)
+│   ├── import/         Homebox backup importer: source, tables, run, report
 │   ├── api/            axum handlers: graphql
 │   ├── routes.rs       router, compression, embedded SPA, /assets cache
 │   └── healthcheck.rs
@@ -87,3 +105,4 @@ home-tracker/
 
 - Design spec: [`docs/superpowers/specs/2026-09-25-home-tracker-design.md`](docs/superpowers/specs/2026-09-25-home-tracker-design.md)
 - Phase 1 plan: [`docs/superpowers/plans/2026-09-25-phase-1-walking-skeleton.md`](docs/superpowers/plans/2026-09-25-phase-1-walking-skeleton.md)
+- Phase 2 plan: [`docs/superpowers/plans/2026-09-26-phase-2-real-data-and-import.md`](docs/superpowers/plans/2026-09-26-phase-2-real-data-and-import.md)
