@@ -1,10 +1,20 @@
+import { EntityList } from 'components/EntityList';
+import { LocationCards } from 'components/LocationCards';
+import { Section } from 'components/Section';
 import { StatCard } from 'components/StatCard';
+import { useLocations } from 'hooks/useLocations';
+import { useRootItems } from 'hooks/useRootItems';
 import { useSummary } from 'hooks/useSummary';
 import { formatCents } from 'utils/currency';
 
+const DEFAULT_CURRENCY = 'USD';
+
 export const HomePage = () => {
   const { summary, loading } = useSummary();
+  const { tree, loading: locationsLoading } = useLocations();
+  const { items: rootItems, loading: rootItemsLoading } = useRootItems();
   const hasError = !loading && !summary;
+  const currency = summary?.currency ?? DEFAULT_CURRENCY;
   return (
     <section>
       <h1>Home</h1>
@@ -31,6 +41,20 @@ export const HomePage = () => {
           error={hasError}
         />
       </div>
+      <Section title="Locations">
+        {!locationsLoading && tree.length === 0 ? (
+          <p className="text-muted">No locations yet.</p>
+        ) : (
+          <LocationCards locations={tree.map((node) => node.location)} />
+        )}
+      </Section>
+      <Section title="Items without a location">
+        {!rootItemsLoading && rootItems.length === 0 ? (
+          <p className="text-muted">Every item has a location.</p>
+        ) : (
+          rootItems.length > 0 && <EntityList items={rootItems} currency={currency} />
+        )}
+      </Section>
     </section>
   );
 };
