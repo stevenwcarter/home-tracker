@@ -117,7 +117,8 @@ mod tests {
             .get_result::<Count>(&mut conn)
             .unwrap()
             .n;
-        assert_eq!(pending, 1);
+        // `currency` plus the three seeded `ai.*` defaults.
+        assert_eq!(pending, 4);
     }
 
     #[test]

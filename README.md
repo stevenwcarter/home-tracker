@@ -28,6 +28,11 @@ on every push.
 | `DATABASE_URL` | `data/db.sqlite` | SQLite path; parent directory is created |
 | `DATA_DIR` | `data` | Originals live under `$DATA_DIR/originals` |
 | `RUST_LOG` | `info` | tracing filter |
+| `OPENAI_API_KEY` | unset | AI API key; overrides the one saved in settings |
+| `OPENAI_BASE_URL` | unset | OpenAI-compatible endpoint; overrides the saved base URL |
+
+An API key saved from the settings screen is stored in plaintext in the
+SQLite database, so treat the database file as a secret.
 
 The Docker image ships `env.prod`, which sets `DATABASE_URL=/data/db.sqlite`
 and `DATA_DIR=/data` to match the `/data` volume.
@@ -188,6 +193,7 @@ home-tracker/
 │   ├── svc/            business logic, one file per aggregate
 │   ├── graphql/        juniper: context, schema, query, objects/ (one file per type)
 │   ├── import/         Homebox backup importer: source, tables, run, report
+│   ├── ai/             model client seam, OPENAI_* environment overrides
 │   ├── api/            axum handlers: graphql, attachments, upload, actor middleware
 │   ├── routes.rs       router, compression, embedded SPA, /assets cache
 │   └── healthcheck.rs

@@ -14,6 +14,8 @@ use axum::{Extension, Router};
 use rust_embed::RustEmbed;
 use tower_http::compression::CompressionLayer;
 
+use crate::ai::AiState;
+use crate::ai::env::AiEnv;
 use crate::api::IMMUTABLE_CACHE;
 use crate::api::actor::attach_actor;
 use crate::api::attachments::attachment_routes;
@@ -61,28 +63,50 @@ async fn immutable_cache(request: Request, next: Next) -> Response {
     response
 }
 
-/// The whole application; originals and thumbnails are read from `data_dir`.
+/// The whole application; originals and thumbnails are read from `data_dir`,
+/// and the AI environment overrides are read here, once.
 pub fn app(pool: SqlitePool, data_dir: PathBuf) -> Router {
+    let env = AiEnv::from_env();
+    tracing::info!(overrides = ?env.overridden(), "AI environment");
+    // Task 3 flips this to OpenAiClient.
+    let ai = Arc::new(AiState {
+        env,
+        ..AiState::disabled()
+    });
     let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
-    app_with_thumbnails(pool, thumbnails)
+    with_actor_seam(routes(pool, thumbnails, ai))
 }
 
-/// [`app`] around a caller-supplied thumbnail service, so tests can observe it.
+/// [`app`] around a caller-supplied thumbnail service, so tests can observe
+/// it. AI is disabled.
 pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
-    // Outermost, so every route (and the fallback) sees the actor.
-    routes(pool, thumbnails).layer(middleware::from_fn(attach_actor))
+    with_actor_seam(routes(pool, thumbnails, Arc::new(AiState::disabled())))
+}
+
+/// Test support: [`app`] with a caller-supplied AI state, so tests set the
+/// environment overrides and the model client without touching the process
+/// environment.
+pub fn app_with_ai(pool: SqlitePool, data_dir: PathBuf, ai: Arc<AiState>) -> Router {
+    let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
+    with_actor_seam(routes(pool, thumbnails, ai))
 }
 
 /// Test support: [`app`] with every request made by `actor` instead of the
 /// one [`attach_actor`] would attach, for tests of what a read-only user may
-/// do. Production uses [`app`].
+/// do. AI is disabled. Production uses [`app`].
 pub fn app_with_actor(pool: SqlitePool, data_dir: PathBuf, actor: Actor) -> Router {
     let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
-    routes(pool, thumbnails).layer(Extension(actor))
+    routes(pool, thumbnails, Arc::new(AiState::disabled())).layer(Extension(actor))
+}
+
+/// `router` with [`attach_actor`] outermost, so every route (and the
+/// fallback) sees the actor.
+fn with_actor_seam(router: Router) -> Router {
+    router.layer(middleware::from_fn(attach_actor))
 }
 
 /// Every route, without the actor layer.
-fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
+fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>, ai: Arc<AiState>) -> Router {
     let schema = Arc::new(create_schema());
     // The thumbnail service's data dir is the one the attachment routes read,
     // so a GraphQL delete removes originals from the same place.
@@ -94,7 +118,7 @@ fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
         // (and a missing-asset 404) would be cached immutably too. Pinned by
         // tests/spa_routes.rs.
         .layer(middleware::from_fn(immutable_cache))
-        .merge(graphql_routes(pool.clone(), schema, data_dir))
+        .merge(graphql_routes(pool.clone(), schema, data_dir, ai))
         .route("/", get(index_handler))
         .fallback(get(index_handler))
         .layer(CompressionLayer::new());

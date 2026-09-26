@@ -2,6 +2,7 @@
 
 use anyhow::{Result, ensure};
 
+pub mod ai_settings;
 pub mod attachment;
 pub mod blob;
 pub mod entity;
@@ -19,8 +20,14 @@ pub mod upload;
 /// `name` with surrounding whitespace removed; blank names are refused.
 /// Every named aggregate (entities, types, tags) goes through this.
 pub(crate) fn required_name(name: &str) -> Result<String> {
-    let trimmed = name.trim();
-    ensure!(!trimmed.is_empty(), "name must not be blank");
+    required_text(name, "name")
+}
+
+/// `value` with surrounding whitespace removed; blank is refused as
+/// "`what` must not be blank".
+pub(crate) fn required_text(value: &str, what: &str) -> Result<String> {
+    let trimmed = value.trim();
+    ensure!(!trimmed.is_empty(), "{what} must not be blank");
     Ok(trimmed.to_owned())
 }
 

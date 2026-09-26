@@ -1,5 +1,6 @@
 #![warn(clippy::str_to_string)]
 
+pub mod ai;
 pub mod api;
 pub mod asset_id;
 pub mod config;

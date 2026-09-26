@@ -4,6 +4,7 @@
 //! `crate::models` row, so resolvers read fields without a copy and fetch
 //! relationships lazily through `svc`.
 
+mod ai_settings;
 mod attachment;
 mod entity;
 mod entity_field;

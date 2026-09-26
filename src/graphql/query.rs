@@ -4,6 +4,7 @@ use super::context::GraphQLContext;
 use super::schema::graphql_translate_anyhow as gql;
 use crate::models::{Entity, EntityType, Tag};
 use crate::svc;
+use crate::svc::ai_settings::AiSettingsView;
 use crate::svc::stats::Summary;
 
 /// `search` returns this many rows when the caller gives no limit.
@@ -48,6 +49,13 @@ impl Query {
         gql(context
             .conn()
             .and_then(|mut c| svc::entity::root_items(&mut c)))
+    }
+
+    /// The AI settings as the settings screen shows them; never the key.
+    fn ai_settings(context: &GraphQLContext) -> FieldResult<AiSettingsView> {
+        gql(context
+            .conn()
+            .and_then(|mut c| svc::ai_settings::view(&mut c, &context.ai.env)))
     }
 
     /// Every tag.

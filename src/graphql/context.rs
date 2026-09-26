@@ -8,6 +8,7 @@ use diesel::SqliteConnection;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
 use juniper::{FieldError, FieldResult};
 
+use crate::ai::AiState;
 use crate::db::SqlitePool;
 
 /// What a user may do. v1 has no users; the enum exists so mutations gate on it now.
@@ -43,17 +44,27 @@ pub struct GraphQLContext {
     pub actor: Actor,
     /// Where originals live, so deleting an attachment can remove its file.
     pub data_dir: Arc<Path>,
+    /// The AI environment overrides and model client, shared process-wide.
+    pub ai: Arc<AiState>,
 }
 
 impl juniper::Context for GraphQLContext {}
 
 impl GraphQLContext {
+    /// A context with AI disabled ([`AiState::disabled`]); the router
+    /// supplies the real state through [`Self::with_ai`].
     pub fn new(pool: SqlitePool, actor: Actor, data_dir: impl Into<Arc<Path>>) -> Self {
         Self {
             pool,
             actor,
             data_dir: data_dir.into(),
+            ai: Arc::new(AiState::disabled()),
         }
+    }
+
+    /// This context with `ai` as its AI state.
+    pub fn with_ai(self, ai: Arc<AiState>) -> Self {
+        Self { ai, ..self }
     }
 
     /// One pooled connection for the duration of a resolver.

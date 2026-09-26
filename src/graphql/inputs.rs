@@ -124,6 +124,30 @@ impl From<TagInput> for svc::tag::NewTag {
     }
 }
 
+/// Every AI setting the screen edits. `apiKey` omitted or null keeps the
+/// stored key, `""` clears it, anything else replaces it. No `Debug`: it
+/// carries the key.
+#[derive(Clone, GraphQLInputObject)]
+pub struct AiSettingsInput {
+    pub base_url: String,
+    pub vision_model: String,
+    pub synthesis_model: String,
+    pub extra_instructions: Option<String>,
+    pub api_key: Option<String>,
+}
+
+impl From<AiSettingsInput> for svc::ai_settings::AiSettingsUpdate {
+    fn from(input: AiSettingsInput) -> Self {
+        Self {
+            base_url: input.base_url,
+            vision_model: input.vision_model,
+            synthesis_model: input.synthesis_model,
+            extra_instructions: input.extra_instructions,
+            api_key: input.api_key,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -4,10 +4,11 @@
 use juniper::{FieldResult, ID};
 
 use super::context::GraphQLContext;
-use super::inputs::{EntityInput, EntityTypeInput, TagInput};
+use super::inputs::{AiSettingsInput, EntityInput, EntityTypeInput, TagInput};
 use super::schema::graphql_translate_anyhow as gql;
 use crate::models::{Entity, EntityType, Tag};
 use crate::svc;
+use crate::svc::ai_settings::AiSettingsView;
 
 pub struct Mutation;
 
@@ -106,6 +107,18 @@ impl Mutation {
             .conn()
             .and_then(|mut c| svc::attachment::set_primary(&mut c, &attachment_id)))
     }
+
+    /// Saves the AI settings; a field set from the environment is refused,
+    /// naming the variable.
+    fn update_ai_settings(
+        ctx: &GraphQLContext,
+        input: AiSettingsInput,
+    ) -> FieldResult<AiSettingsView> {
+        ctx.require_write()?;
+        gql(ctx
+            .conn()
+            .and_then(|mut c| svc::ai_settings::update(&mut c, &ctx.ai.env, input.into())))
+    }
 }
 
 #[cfg(test)]
@@ -118,7 +131,7 @@ mod tests {
     use crate::graphql::context::{Actor, Role};
     use crate::graphql::schema::create_schema;
     use crate::models::{Attachment, TagEntity};
-    use crate::schema::{attachments, entities, entity_types, tag_entities, tags};
+    use crate::schema::{attachments, entities, entity_types, settings, tag_entities, tags};
     use crate::svc::entity_type::NewEntityType;
     use crate::svc::fixtures::{SampleIds, seed_sample};
 
@@ -130,6 +143,7 @@ mod tests {
         tags: Vec<Tag>,
         attachments: Vec<Attachment>,
         tag_entities: Vec<TagEntity>,
+        settings: Vec<(String, String)>,
     }
 
     fn snapshot(conn: &mut SqliteConnection) -> Snapshot {
@@ -158,12 +172,13 @@ mod tests {
                 .order((tag_entities::tag_id, tag_entities::entity_id))
                 .load(conn)
                 .unwrap(),
+            settings: settings::table.order(settings::key).load(conn).unwrap(),
         }
     }
 
     /// One document per mutation, each valid for a write actor on the sample
     /// (plus the unused type `spare_type`), so a refusal can only be the gate.
-    fn mutations(ids: &SampleIds, spare_type: &str) -> [String; 11] {
+    fn mutations(ids: &SampleIds, spare_type: &str) -> [String; 12] {
         let item = ITEM_TYPE_ID;
         [
             format!(
@@ -192,6 +207,8 @@ mod tests {
                 r#"mutation {{ setPrimaryPhoto(attachmentId: "{}") {{ id }} }}"#,
                 ids.photo
             ),
+            r#"mutation { updateAiSettings(input: { baseUrl: "https://llm.example/v1", visionModel: "v", synthesisModel: "s", apiKey: "k" }) { hasApiKey } }"#
+                .to_owned(),
         ]
     }
 
