@@ -357,7 +357,7 @@ Validation rules enforced in `svc`, tested at the GraphQL seam:
 | POST | `/graphql` | juniper_axum. GraphiQL served at `/graphiql` in debug builds only. |
 | GET | `/attachments/{id}` | Streams the original from `$DATA_DIR/originals/<sha256>` with its stored MIME type and `Content-Disposition: inline; filename="<title>"`. Immutable cache headers. |
 | GET | `/attachments/{id}/thumb/{size}` | `size` is rounded **up** to the smallest allowed size ≥ it; above 1200 clamps to 1200; a non-positive or non-numeric size is HTTP 400. Non-image attachments 404. Immutable cache headers. |
-| POST | `/api/upload/{entityId}` | Multipart photo upload (phase 5). One `file` field, optional `primary` (`true`/`1`/`on`/`yes`, any case). `201` with JSON `{ id, kind, primary, title, mimeType, sizeBytes, url, thumbnailUrl }`. Errors are JSON `{ "error": "..." }`: `400` missing or repeated `file` field or a malformed form; `403` the actor may not write; `404` unknown entity; `413` body over 25 MiB; `415` sniffed format not JPEG/PNG/GIF/WebP; `422` header does not decode or exceeds the decode limits; `500` with a path-free message. Not compressed. |
+| POST | `/api/upload/{entityId}` | Multipart photo upload (phase 5). One `file` field, optional `primary` (`true`/`1`/`on`/`yes`, any case). `201` with JSON `{ id, kind, primary, title, mimeType, sizeBytes, url, thumbnailUrl }`. Errors are JSON `{ "error": "..." }`: `400` missing or repeated `file` field or a malformed form; `403` the actor may not write; `404` unknown entity; `413` file over 25 MiB or body over 25 MiB plus 64 KiB; `415` sniffed format not JPEG/PNG/GIF/WebP; `422` header or pixels do not decode, or exceed the decode limits; `500` with a path-free message. Not compressed. |
 | GET | `/*` | Embedded SPA. Unknown paths fall back to `index.html`. |
 
 Both `url` and `thumbnailUrl` carry `?v=<sha256 prefix>`, the first 12 hex
@@ -371,12 +371,16 @@ from the app's origin: `nosniff` stops the browser guessing a more dangerous
 type than the stored one, and `sandbox` makes an HTML or SVG original opened
 directly a sandboxed document that cannot run script on the app origin.
 
-Upload ordering: `RequestBodyLimitLayer` (25 MiB, this route only; axum's
+Upload ordering: `RequestBodyLimitLayer` (`MAX_UPLOAD_BYTES` = 25 MiB plus
+`MULTIPART_OVERHEAD_BYTES` = 64 KiB for the form, this route only; axum's
 2 MiB `DefaultBodyLimit` is disabled there) wraps the handler, and a
 `map_response` layer outside it rewrites its plain-text 413 as JSON. So an
 over-limit `Content-Length` is 413 before the actor is checked. Inside the
 handler, a caller who may not write gets 403 before the body is read; a body
-that trips the limit mid-stream is also 413, with the temp file removed.
+that trips the limit mid-stream, or a `file` field that grows past 25 MiB, is
+also 413, with the temp file removed. A 413 sent before the body is read
+usually reaches a browser as a reset connection, so the site refuses a file
+over 25 MiB before posting it.
 
 A healthcheck needs no route: the `healthcheck` subcommand connects to
 `127.0.0.1:$PORT`, sends `GET / HTTP/1.0`, reads one byte, exits 0/1.
@@ -465,13 +469,17 @@ thumbnail, one custom field).
   2. sniffs the first bytes (`svc::sniff`): JPEG `FF D8 FF`, the PNG
      signature, `GIF87a`/`GIF89a`, `RIFF....WEBP`, else 415. The client's
      content type and filename never decide the format;
-  3. reads the image header under the thumbnailer's `decode_limits()` (8192px
-     per edge, 256 MiB decode buffer), else 422, so every stored photo can be
-     thumbnailed. No pixels are decoded;
+  3. reads the image header, as the sniffed format, under the thumbnailer's
+     `decode_limits()` (8192px per edge, 256 MiB decode buffer), else 422.
+     No pixels are decoded yet: this cheap gate runs before the file is
+     placed;
   4. takes an in-process placing claim on `originals/<sha256>`, renames the
      temp file there if absent or drops it if those bytes are already stored
-     (dedupe), then inserts the row in an immediate transaction that re-checks
-     the entity, and releases the claim. Deleting an attachment removes its
+     (dedupe), generates the 300px thumbnail (decoding every pixel, so a
+     truncated or corrupt body is 422 with no row, and the placed file is
+     removed unless shared), then inserts the row and that thumbnail in an
+     immediate transaction that re-checks the entity, and releases the claim.
+     Steps 3 and 4 together ensure every stored photo can be thumbnailed. Deleting an attachment removes its
      original only when no row shares the hash and no upload holds a claim on
      it, both checked under the claim lock, so a delete racing an upload of
      identical bytes cannot lose the file. The claim is per process: running
@@ -483,8 +491,8 @@ thumbnail, one custom field).
 
   Primary rule: an entity's first photo becomes primary, and `primary=true`
   on a later upload takes over, so exactly one photo is primary. Deleting the
-  primary photo promotes the earliest remaining photo (by `created_at`, then
-  id).
+  primary photo promotes the earliest remaining photo that `is_thumbnailable`
+  (by `created_at`, then id), so an imported HEIC is never promoted.
 
 ## 10. Authentication readiness
 

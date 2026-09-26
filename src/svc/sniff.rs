@@ -1,6 +1,8 @@
 //! Image format detection from magic bytes. An upload's type is decided here,
 //! never by the client's content type or filename, which are only advisory.
 
+use image::ImageFormat as CodecFormat;
+
 /// How many leading bytes [`sniff`] needs to tell every format apart.
 pub const SNIFF_LEN: usize = 12;
 
@@ -25,6 +27,17 @@ impl ImageFormat {
             Self::Png => "image/png",
             Self::Gif => "image/gif",
             Self::WebP => "image/webp",
+        }
+    }
+
+    /// The decoder for this format, so decoding judges the bytes as the
+    /// format [`sniff`] found rather than guessing again.
+    pub fn codec(self) -> CodecFormat {
+        match self {
+            Self::Jpeg => CodecFormat::Jpeg,
+            Self::Png => CodecFormat::Png,
+            Self::Gif => CodecFormat::Gif,
+            Self::WebP => CodecFormat::WebP,
         }
     }
 

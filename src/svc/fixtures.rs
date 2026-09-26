@@ -286,6 +286,21 @@ pub fn png(w: u32, h: u32) -> Vec<u8> {
     out.into_inner()
 }
 
+/// A `w × h` PNG of busy pixels cut to 60% of its length: its header decodes,
+/// its pixel data does not.
+pub fn png_truncated_body(w: u32, h: u32) -> Vec<u8> {
+    let img = RgbImage::from_fn(w, h, |x, y| {
+        Rgb([(x * 7 + y * 13) as u8, (x * y) as u8, (x ^ y) as u8])
+    });
+    let mut out = Cursor::new(Vec::new());
+    DynamicImage::ImageRgb8(img)
+        .write_to(&mut out, ImageFormat::Png)
+        .expect("encode fixture PNG");
+    let mut bytes = out.into_inner();
+    bytes.truncate(bytes.len() * 6 / 10);
+    bytes
+}
+
 /// A well-framed PNG whose IHDR claims `w`×`h` 8-bit greyscale pixels but
 /// which carries no pixel data: a small file with enormous declared
 /// dimensions, for exercising the decoder limits.

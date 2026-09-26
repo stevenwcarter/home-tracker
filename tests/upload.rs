@@ -16,10 +16,11 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use axum_test::multipart::{MultipartForm, Part};
 use axum_test::{TestResponse, TestServer};
+use home_tracker::api::upload::{MAX_UPLOAD_BYTES, MULTIPART_OVERHEAD_BYTES};
 use home_tracker::db::TestDb;
 use home_tracker::graphql::context::{Actor, Role};
 use home_tracker::routes::{app, app_with_actor};
-use home_tracker::svc::fixtures::{SampleIds, jpeg, seed_sample};
+use home_tracker::svc::fixtures::{SampleIds, jpeg, png_truncated_body, seed_sample};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::io::{self, AsyncRead, AsyncReadExt, ReadBuf};
@@ -350,16 +351,68 @@ async fn declared_over_limit_length_is_413_json() {
 }
 
 #[tokio::test]
-async fn an_upload_just_under_the_limit_is_accepted() {
+async fn a_file_of_exactly_the_limit_is_accepted() {
     let f = Fixture::new();
-    // A real JPEG padded with trailing bytes decoders ignore, just under 25 MiB
-    // of body in total, proves the 2 MiB axum default is not in force.
+    // A real JPEG padded after its end marker, which decoders ignore, to
+    // exactly the file limit: the body layer leaves room for the form around
+    // it, and the 2 MiB axum default is not in force.
     let mut bytes = jpeg(8, 6);
-    bytes.resize(24 * MIB, 0);
+    bytes.resize(MAX_UPLOAD_BYTES, 0);
 
     let response = f.upload(&f.ids.screws, photo_form(bytes)).await;
 
     response.assert_status(StatusCode::CREATED);
+    assert_eq!(response.json::<Value>()["sizeBytes"], MAX_UPLOAD_BYTES);
+}
+
+#[tokio::test]
+async fn a_file_one_byte_over_the_limit_is_413_and_stores_nothing() {
+    let f = Fixture::new();
+    // Within the body limit, so it is the file's own size that is refused.
+    let mut bytes = jpeg(8, 6);
+    bytes.resize(MAX_UPLOAD_BYTES + 1, 0);
+
+    let response = f.upload(&f.ids.screws, photo_form(bytes)).await;
+
+    response.assert_status(StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(!error_message(&response).is_empty());
+    assert_eq!(f.originals(), Vec::<String>::new());
+    assert!(f.attachments(&f.ids.screws).await.is_empty());
+}
+
+#[tokio::test]
+async fn a_body_one_byte_over_the_limit_and_its_overhead_is_413() {
+    let f = Fixture::new();
+    let request = Request::post(format!("/api/upload/{}", f.ids.screws))
+        .header(
+            header::CONTENT_TYPE,
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .header(
+            header::CONTENT_LENGTH,
+            MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES + 1,
+        )
+        .body(Body::empty())
+        .unwrap();
+
+    let response = f.router().oneshot(request).await.unwrap();
+
+    assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert!(json_body(response).await["error"].is_string());
+}
+
+#[tokio::test]
+async fn a_truncated_image_body_is_422_json_and_stores_nothing() {
+    let f = Fixture::new();
+
+    let response = f
+        .upload(&f.ids.screws, photo_form(png_truncated_body(64, 64)))
+        .await;
+
+    response.assert_status(StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(!error_message(&response).is_empty());
+    assert_eq!(f.originals(), Vec::<String>::new());
+    assert!(f.attachments(&f.ids.screws).await.is_empty());
 }
 
 #[tokio::test]

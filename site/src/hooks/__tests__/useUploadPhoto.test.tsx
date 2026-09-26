@@ -122,6 +122,28 @@ describe('useUploadPhoto', () => {
     expect(toast.error).toHaveBeenCalledWith(`Could not upload big.jpg: ${message}`);
   });
 
+  it('refuses a file over the size cap without posting it, and carries on with the next', async () => {
+    // The server's 413 for an oversized body arrives before the body is read,
+    // so a browser sees a reset connection instead: the cap is checked here.
+    const { forms } = answerUploads(() => json(201, created('p1')));
+    const { result } = render(() => useUploadPhoto(DRILL));
+    const big = jpeg('huge.jpg');
+    Object.defineProperty(big, 'size', { value: 26 * 1024 * 1024 });
+    const small = jpeg('small.jpg');
+    let results: UploadResult[] = [];
+    await act(async () => {
+      results = await result.current.upload([big, small], { primary: true });
+    });
+    expect(results).toEqual([
+      { file: big, ok: false, error: 'File is larger than 25 MB' },
+      { file: small, ok: true },
+    ]);
+    expect(forms.map((form) => form.get('file'))).toEqual([small]);
+    expect(toast.error).toHaveBeenCalledWith(
+      'Could not upload huge.jpg: File is larger than 25 MB',
+    );
+  });
+
   it("passes a 403's server message through", async () => {
     answerUploads(() => json(403, { error: 'this instance is read-only' }));
     const { result } = render(() => useUploadPhoto(DRILL));

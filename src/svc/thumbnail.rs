@@ -3,8 +3,14 @@
 use std::io::Cursor;
 
 use anyhow::{Context, Result};
+use chrono::NaiveDateTime;
 use image::metadata::Orientation;
 use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
+
+use crate::models::Thumbnail;
+
+/// The MIME type of every generated thumbnail.
+pub const GENERATED_MIME: &str = "image/webp";
 
 /// Quality passed to the WebP encoder for generated thumbnails (0-100).
 pub const WEBP_QUALITY: f32 = 80.0;
@@ -16,6 +22,26 @@ pub struct Generated {
     pub data: Vec<u8>,
     pub width: u32,
     pub height: u32,
+}
+
+impl Generated {
+    /// The thumbnail row storing this as `attachment_id`'s `size` thumbnail.
+    pub fn into_row(
+        self,
+        attachment_id: String,
+        size: ThumbSize,
+        created_at: NaiveDateTime,
+    ) -> Result<Thumbnail> {
+        Ok(Thumbnail {
+            attachment_id,
+            size: i32::try_from(size.get()).context("thumbnail size out of range")?,
+            mime_type: GENERATED_MIME.to_owned(),
+            width: i32::try_from(self.width).context("thumbnail width out of range")?,
+            height: i32::try_from(self.height).context("thumbnail height out of range")?,
+            data: self.data,
+            created_at,
+        })
+    }
 }
 
 /// The largest original edge, in pixels, that will be decoded (8192² ≈ 64 MP).
@@ -68,6 +94,9 @@ pub fn generate_bytes(original: &[u8], size: u32) -> Result<Generated> {
 pub struct ThumbSize(u32);
 
 impl ThumbSize {
+    /// The smallest size, generated with every upload.
+    pub const SMALLEST: Self = THUMB_SIZES[0];
+
     /// The box edge in pixels.
     pub fn get(self) -> u32 {
         self.0

@@ -1,7 +1,7 @@
 import { useApolloClient } from '@apollo/client/react';
 import { useCallback, useState } from 'react';
 import { toast } from 'react-toastify';
-import { NETWORK_ERROR_MESSAGE, uploadErrorMessage } from 'utils/uploadErrors';
+import { NETWORK_ERROR_MESSAGE, preflightError, uploadErrorMessage } from 'utils/uploadErrors';
 import { refetchAfterWrite } from './useRefetchingMutation';
 
 /** The queries a new photo can change: the open page, list thumbnails and the summary. */
@@ -41,8 +41,13 @@ const serverError = async (response: Response): Promise<string | null> => {
   return null;
 };
 
-/** Posts one file; resolves to its result and never rejects. */
+/**
+ * Posts one file; resolves to its result and never rejects. A file over the
+ * size cap is refused here without a request (see `preflightError`).
+ */
 const postPhoto = async (entityId: string, file: File, primary: boolean): Promise<UploadResult> => {
+  const refused = preflightError(file);
+  if (refused) return { file, ok: false, error: refused };
   const form = new FormData();
   form.append('file', file);
   if (primary) form.append('primary', 'true');

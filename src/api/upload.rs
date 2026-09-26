@@ -4,12 +4,20 @@
 //! is streamed to a temp file under `originals/` as it arrives, then handed to
 //! [`upload::store`], which decides its type from its bytes (the client's
 //! content type and filename are advisory) and files it under the primary
-//! rule. The body is capped at [`MAX_UPLOAD_BYTES`] on this route only, and a
-//! caller who may not write is refused before the body is read.
+//! rule. A caller who may not write is refused before the body is read.
 //!
-//! The limit layer runs before the handler, so a request whose
-//! `Content-Length` is over the limit gets 413 even from a caller who may not
-//! write (who would otherwise get 403): the size is judged before the actor.
+//! Size is judged twice, in this order:
+//!
+//! 1. The body limit layer, on this route only, allows [`MAX_UPLOAD_BYTES`]
+//!    plus [`MULTIPART_OVERHEAD_BYTES`] for the form around the file, so a
+//!    file of exactly the limit fits. It runs before the handler, so a
+//!    request whose `Content-Length` is over it gets 413 even from a caller
+//!    who may not write (who would otherwise get 403). That 413 is sent
+//!    before the body is read, and a browser whose upload is cut off that way
+//!    usually reports a network error rather than the response: the site
+//!    checks the file size itself before posting.
+//! 2. While streaming, the `file` field alone may not exceed
+//!    [`MAX_UPLOAD_BYTES`]; one that does is 413 and leaves no temp file.
 //!
 //! Every error answers `{ "error": "<message>" }` with its status: 400 for a
 //! missing or duplicate `file` field or a malformed form, 403, 404 for an
@@ -41,8 +49,13 @@ use crate::models::Attachment;
 use crate::svc::attachment;
 use crate::svc::upload::{self, Staged, TempUpload, UploadError};
 
-/// The largest request body the upload route accepts: 25 MiB.
+/// The largest file the upload route stores: 25 MiB. The site checks the
+/// same limit before posting (`MAX_UPLOAD_BYTES` in `site/src/utils/uploadErrors.ts`).
 pub const MAX_UPLOAD_BYTES: usize = 25 * 1024 * 1024;
+
+/// Room left in the body limit for the multipart framing around the file:
+/// boundaries, part headers and the `primary` field.
+pub const MULTIPART_OVERHEAD_BYTES: usize = 64 * 1024;
 
 /// Chunks buffered between the request stream and the temp-file writer.
 const CHUNKS_IN_FLIGHT: usize = 8;
@@ -60,7 +73,9 @@ pub fn upload_routes(pool: SqlitePool, data_dir: Arc<PathBuf>) -> Router {
         // The limit layer governs: axum's 2 MiB default for `Multipart`
         // would otherwise cut in first.
         .layer(DefaultBodyLimit::disable())
-        .layer(RequestBodyLimitLayer::new(MAX_UPLOAD_BYTES))
+        .layer(RequestBodyLimitLayer::new(
+            MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES,
+        ))
         // Outside the limit layer, which refuses an over-long `Content-Length`
         // with a plain-text 413 before the handler runs.
         .layer(middleware::map_response(json_too_large))
@@ -237,16 +252,16 @@ async fn receive(mut multipart: Multipart, originals_dir: PathBuf) -> Result<For
 /// Streams `field` into a new temp upload under `originals_dir`.
 ///
 /// The file work runs on the blocking pool, fed chunk by chunk. A stream
-/// error (a client that goes away, or the body limit tripping) is forwarded
-/// to the writer, which then drops the temp file (removing it) without
-/// flushing or syncing it. The writer is always awaited, so the temp file is
+/// error (a client that goes away, or the body limit tripping) or a file
+/// growing past [`MAX_UPLOAD_BYTES`] is forwarded to the writer, which then
+/// drops the temp file (removing it) without flushing or syncing it. The writer is always awaited, so the temp file is
 /// gone before the response is.
 ///
 /// Each upload in flight holds one blocking-pool thread for as long as the
 /// client takes to send it: acceptable for a household LAN app without auth,
 /// where concurrent uploads are few.
 async fn stage(mut field: Field<'_>, originals_dir: PathBuf) -> Result<Staged, UploadFailure> {
-    let (tx, mut rx) = mpsc::channel::<Result<Bytes, MultipartError>>(CHUNKS_IN_FLIGHT);
+    let (tx, mut rx) = mpsc::channel::<Result<Bytes, UploadFailure>>(CHUNKS_IN_FLIGHT);
     let writer = task::spawn_blocking(move || {
         let mut temp = TempUpload::create(&originals_dir)?;
         while let Some(chunk) = rx.blocking_recv() {
@@ -254,7 +269,16 @@ async fn stage(mut field: Field<'_>, originals_dir: PathBuf) -> Result<Staged, U
         }
         Ok::<_, UploadFailure>(temp.finish()?)
     });
+    let mut received = 0;
     while let Some(item) = field.chunk().await.transpose() {
+        let item = item.map_err(UploadFailure::from).and_then(|chunk| {
+            received += chunk.len();
+            if received > MAX_UPLOAD_BYTES {
+                Err(UploadFailure::TooLarge)
+            } else {
+                Ok(chunk)
+            }
+        });
         let failed = item.is_err();
         // A closed channel means the writer failed; awaiting it says why.
         if tx.send(item).await.is_err() || failed {

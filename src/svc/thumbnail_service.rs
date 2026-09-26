@@ -18,9 +18,6 @@ use crate::models::{Attachment, Thumbnail};
 use crate::svc::thumbnail::ThumbSize;
 use crate::svc::{attachment, thumbnail};
 
-/// The MIME type of every thumbnail this service generates.
-const GENERATED_MIME: &str = "image/webp";
-
 /// One in-flight generation: `(attachment_id, size)`.
 type Key = (String, ThumbSize);
 type KeyLocks = StdMutex<HashMap<Key, Arc<Mutex<()>>>>;
@@ -38,7 +35,8 @@ pub struct ThumbnailService {
     locks: KeyLocks,
     /// Attachment id → the sha256 of its original that failed to decode, for
     /// the process lifetime. Keyed with the hash so new bytes under the same
-    /// id (a re-import) are tried again.
+    /// id (a re-import) are tried again. Never pruned: it holds at most one
+    /// entry per attachment id, so it is bounded by the attachments table.
     failed: StdMutex<HashMap<String, String>>,
     generations: AtomicU64,
     permits: Semaphore,
@@ -112,15 +110,7 @@ impl ThumbnailService {
         let Some(generated) = self.generate(&att, size).await? else {
             return Ok(None);
         };
-        let row = Thumbnail {
-            attachment_id: att.id.clone(),
-            size: db_size,
-            mime_type: GENERATED_MIME.to_owned(),
-            width: i32::try_from(generated.width).context("thumbnail width out of range")?,
-            height: i32::try_from(generated.height).context("thumbnail height out of range")?,
-            data: generated.data,
-            created_at: Utc::now().naive_utc(),
-        };
+        let row = generated.into_row(att.id.clone(), size, Utc::now().naive_utc())?;
         let mut conn = self
             .pool
             .get()
@@ -379,7 +369,7 @@ mod tests {
             &Thumbnail {
                 attachment_id: "att-1".to_owned(),
                 size: 500,
-                mime_type: GENERATED_MIME.to_owned(),
+                mime_type: thumbnail::GENERATED_MIME.to_owned(),
                 width: 4,
                 height: 3,
                 data: vec![1; 8],

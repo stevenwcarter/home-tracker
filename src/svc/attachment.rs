@@ -146,9 +146,10 @@ fn require(conn: &mut SqliteConnection, id: &str) -> Result<Attachment> {
 }
 
 /// Deletes attachment `id`; its thumbnails go with it by foreign key. When it
-/// was its entity's primary photo, the earliest remaining photo takes over,
-/// just as the first photo uploaded becomes primary. The original file is
-/// removed once the row is gone, when no other attachment shares its hash.
+/// was its entity's primary photo, the earliest remaining photo that can be
+/// thumbnailed takes over, just as the first photo uploaded becomes primary.
+/// The original file is removed once the row is gone, when no other
+/// attachment shares its hash.
 pub fn delete(conn: &mut SqliteConnection, data_dir: &Path, id: &str) -> Result<()> {
     let orphan = conn.transaction(|conn| {
         let row = require(conn, id)?;
@@ -164,16 +165,20 @@ pub fn delete(conn: &mut SqliteConnection, data_dir: &Path, id: &str) -> Result<
     Ok(())
 }
 
-/// Flags the earliest photo of `entity_id` (by creation, then id) as primary.
+/// Flags the earliest photo of `entity_id` (by creation, then id) that can be
+/// thumbnailed as primary. A photo that cannot (an imported HEIC, say) would
+/// be a primary photo nothing can show, so it is passed over.
 fn promote_earliest_photo(conn: &mut SqliteConnection, entity_id: &str) -> Result<()> {
-    let earliest: Option<String> = attachments::table
+    let photos: Vec<(String, String)> = attachments::table
         .filter(attachments::entity_id.eq(entity_id))
         .filter(attachments::kind.eq(AttachmentKind::Photo))
         .order((attachments::created_at.asc(), attachments::id.asc()))
-        .select(attachments::id)
-        .first(conn)
-        .optional()
-        .with_context(|| format!("finding the earliest photo of entity {entity_id:?}"))?;
+        .select((attachments::id, attachments::mime_type))
+        .load(conn)
+        .with_context(|| format!("finding the photos of entity {entity_id:?}"))?;
+    let earliest = photos
+        .into_iter()
+        .find_map(|(id, mime)| thumbnail::is_thumbnailable(&mime).then_some(id));
     if let Some(earliest) = earliest {
         diesel::update(attachments::table.find(&earliest))
             .set(attachments::is_primary.eq(true))
@@ -512,6 +517,31 @@ mod tests {
         assert_eq!(
             primary_photo(&mut conn, &ids.drill).unwrap().unwrap().id,
             "a-drill-early"
+        );
+    }
+
+    #[test]
+    fn promotion_skips_photos_that_cannot_be_thumbnailed() {
+        // An imported HEIC is a photo row, but it would be an invisible primary.
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        add_drill_photos(&mut conn, &ids);
+        diesel::update(attachments::table.find("a-drill-early"))
+            .set(attachments::mime_type.eq("image/heic"))
+            .execute(&mut conn)
+            .unwrap();
+        let data = tempfile::tempdir().unwrap();
+
+        delete(&mut conn, data.path(), &ids.photo).unwrap();
+
+        assert_eq!(
+            flags(&mut conn, &ids.drill),
+            [
+                ("a-drill-early".to_owned(), false),
+                ("a-drill-late".to_owned(), true),
+                (ids.manual.clone(), false),
+            ]
         );
     }
 

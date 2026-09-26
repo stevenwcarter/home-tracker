@@ -96,18 +96,23 @@ thumbnail opens a 1200px viewer with Previous/Next, closed with Escape.
 - **Formats:** JPEG, PNG, GIF and WebP. The server decides the format from
   the file's first bytes, never from its name or the browser's content type,
   so a renamed text file is refused (415). A file in one of those formats
-  whose header does not decode, or whose image is over 8192px on a side or
-  would need more than 256 MiB to decode, is refused too (422).
-- **Size:** at most 25 MiB per request (413 above that). Only the upload
-  route has this limit.
+  that does not decode (a damaged header or a truncated body), or whose image
+  is over 8192px on a side or would need more than 256 MiB to decode, is
+  refused too (422), so every stored photo can be thumbnailed.
+- **Size:** at most 25 MiB per file (413 above that); the request may carry
+  64 KiB more for the form around it. Only the upload route has this limit.
+  The site refuses a larger file before sending it, since a browser cut off
+  mid-upload usually reports a network error instead of the 413.
 - **Primary photo:** an entity's first photo becomes its primary photo. A
   later upload sent with `primary=true` takes over, so exactly one photo is
-  primary. Deleting the primary photo promotes the earliest remaining one.
+  primary. Deleting the primary photo promotes the earliest remaining photo
+  that can be thumbnailed (an imported HEIC is passed over).
 - **Dedupe:** originals are stored once per content hash under
   `$DATA_DIR/originals/<sha256>`. Uploading the same bytes to a second entity
   adds a row, not a file; the file is removed when its last row is deleted.
-- **Thumbnails:** generated on first request at 300, 500 and 1200px (WebP,
-  never upscaled) and cached in the database. An original that fails to
+- **Thumbnails:** the 300px one is made during the upload itself; 500 and
+  1200px are generated on first request (all WebP, never upscaled) and
+  cached in the database. An original that fails to
   decode is remembered for the life of the process, so it is not decoded
   again on every request; its thumbnails answer 404.
 

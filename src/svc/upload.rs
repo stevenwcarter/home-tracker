@@ -1,7 +1,9 @@
 //! Storing an uploaded photo: stream it to a temp file while hashing, decide
 //! its type from its bytes, check its header decodes within the thumbnailer's
 //! limits, move it to its content address (or drop it when those bytes are
-//! already stored), and insert its attachment row under the primary rule.
+//! already stored), make its smallest thumbnail (which decodes every pixel,
+//! so a damaged body is refused too), and insert its attachment row and that
+//! thumbnail under the primary rule.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
@@ -17,9 +19,10 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::kinds::AttachmentKind;
-use crate::models::Attachment;
+use crate::models::{Attachment, Thumbnail};
 use crate::schema::attachments;
 use crate::svc::sniff::{self, ImageFormat, SNIFF_LEN};
+use crate::svc::thumbnail::ThumbSize;
 use crate::svc::{attachment, entity, thumbnail};
 
 /// Why an upload was not stored. Each variant maps to one HTTP status.
@@ -123,13 +126,15 @@ pub struct StoredUpload {
 /// Stores `staged` as a photo of `entity_id` titled after `filename` (the
 /// client's name for it, advisory only). The first photo of an entity
 /// becomes its primary photo, as does any photo uploaded with `primary`.
-/// On any failure the temp file is removed, and so is a newly placed
-/// original that no attachment references.
+/// Its [`ThumbSize::SMALLEST`] thumbnail is generated and stored with it, so
+/// an image whose pixels do not decode is [`UploadError::Unreadable`]. On any
+/// failure the temp file is removed, and so is a newly placed original that
+/// no attachment references.
 ///
 /// # Blocking
 ///
-/// Reads the file, renames it and queries SQLite synchronously: call it from
-/// `spawn_blocking`.
+/// Reads and decodes the file, renames it and queries SQLite synchronously:
+/// call it from `spawn_blocking`.
 pub fn store(
     conn: &mut SqliteConnection,
     data_dir: &Path,
@@ -161,7 +166,7 @@ struct Placed {
 /// file, so a concurrent delete of the last other sharer leaves it in place.
 fn place(data_dir: &Path, staged: Staged) -> Result<Placed, UploadError> {
     let format = staged.format().ok_or(UploadError::Unsupported)?;
-    staged.check_header()?;
+    staged.check_header(format)?;
     let size_bytes = i64::try_from(staged.size_bytes).context("upload too large")?;
     let original = attachment::original_path(data_dir, &staged.sha256);
     let claim = attachment::PlacingOriginal::claim(original.clone());
@@ -181,8 +186,10 @@ fn place(data_dir: &Path, staged: Staged) -> Result<Placed, UploadError> {
     })
 }
 
-/// Inserts the attachment row for `placed`, then releases its claim. On
-/// failure the original is removed unless something else references it.
+/// Makes the smallest thumbnail of `placed` and inserts it with its
+/// attachment row, then releases the claim. On failure, including an original
+/// whose pixels do not decode, the original is removed unless something else
+/// references it.
 fn commit(
     conn: &mut SqliteConnection,
     data_dir: &Path,
@@ -204,23 +211,41 @@ fn commit(
         created_at: now,
         updated_at: now,
     };
-    // Immediate, so simultaneous first uploads to one entity queue for the
-    // write lock instead of failing to upgrade a read transaction.
-    let inserted = conn
-        .immediate_transaction(|conn| insert_photo(conn, row, primary))
-        .map_err(UploadError::Io)
-        .and_then(|row| row.ok_or(UploadError::NotFound));
+    // Decoded before the transaction, so the write lock is not held for it.
+    let inserted = smallest_thumbnail(data_dir, &row).and_then(|thumb| {
+        // Immediate, so simultaneous first uploads to one entity queue for
+        // the write lock instead of failing to upgrade a read transaction.
+        conn.immediate_transaction(|conn| insert_photo(conn, row, &thumb, primary))
+            .map_err(UploadError::Io)
+            .and_then(|row| row.ok_or(UploadError::NotFound))
+    });
     drop(placed.claim);
     inserted
         .map(|attachment| StoredUpload { attachment })
         .inspect_err(|_| attachment::remove_original(conn, data_dir, &placed.sha256))
 }
 
-/// Inserts photo `row`, making it its entity's primary photo when asked to or
-/// when the entity has no photo yet. `None` when the entity no longer exists.
+/// The [`ThumbSize::SMALLEST`] thumbnail of `row`'s placed original, or
+/// [`UploadError::Unreadable`] when its pixels do not decode.
+fn smallest_thumbnail(data_dir: &Path, row: &Attachment) -> Result<Thumbnail, UploadError> {
+    let original = fs::read(attachment::original_path(data_dir, &row.sha256))
+        .context("reading the placed upload")?;
+    let generated =
+        thumbnail::generate_bytes(&original, ThumbSize::SMALLEST.get()).map_err(|err| {
+            let reason = format!("{err:#}");
+            info!(sha256 = %row.sha256, %reason, "refusing an unreadable upload");
+            UploadError::Unreadable
+        })?;
+    Ok(generated.into_row(row.id.clone(), ThumbSize::SMALLEST, row.created_at)?)
+}
+
+/// Inserts photo `row` and its `thumb`, making the photo its entity's primary
+/// photo when asked to or when the entity has no photo yet. `None` when the
+/// entity no longer exists.
 fn insert_photo(
     conn: &mut SqliteConnection,
     mut row: Attachment,
+    thumb: &Thumbnail,
     primary: bool,
 ) -> anyhow::Result<Option<Attachment>> {
     if entity::get(conn, &row.entity_id)?.is_none() {
@@ -237,6 +262,7 @@ fn insert_photo(
         .values(&row)
         .execute(conn)
         .with_context(|| format!("storing an upload for entity {:?}", row.entity_id))?;
+    attachment::insert_thumbnail(conn, thumb)?;
     if primary || !has_photo {
         attachment::set_primary(conn, &row.id)?;
         row.is_primary = true;
@@ -251,14 +277,15 @@ impl Staged {
         sniff::sniff(&self.head[..len])
     }
 
-    /// Reads the image header, refusing one that does not decode or whose
-    /// dimensions or decode buffer exceed the thumbnailer's limits, so every
-    /// stored photo can be thumbnailed. No pixels are decoded.
-    fn check_header(&self) -> Result<(), UploadError> {
-        let mut reader = ImageReader::open(&self.temp)
-            .context("opening the upload's temp file")?
-            .with_guessed_format()
-            .context("reading the upload's temp file")?;
+    /// Reads the image header as the sniffed `format`, refusing one that does
+    /// not decode or whose dimensions or decode buffer exceed the
+    /// thumbnailer's limits. No pixels are decoded here: this is the cheap
+    /// gate before the file is placed, and the thumbnail made in [`commit`]
+    /// decodes the body, so together they ensure every stored photo can be
+    /// thumbnailed.
+    fn check_header(&self, format: ImageFormat) -> Result<(), UploadError> {
+        let mut reader = ImageReader::open(&self.temp).context("opening the upload's temp file")?;
+        reader.set_format(format.codec());
         reader.limits(thumbnail::decode_limits());
         let reason = match reader.into_decoder() {
             Ok(decoder) if decoder.total_bytes() <= thumbnail::MAX_DECODE_ALLOC => return Ok(()),
@@ -334,7 +361,9 @@ mod tests {
 
     use super::*;
     use crate::db::TestDb;
-    use crate::svc::fixtures::{SampleIds, jpeg, png, png_header, png_header_rgba16, seed_sample};
+    use crate::svc::fixtures::{
+        SampleIds, jpeg, png, png_header, png_header_rgba16, png_truncated_body, seed_sample,
+    };
 
     /// A migrated, seeded database and an empty data dir with `originals/`.
     struct Harness {
@@ -536,6 +565,38 @@ mod tests {
 
         assert!(matches!(err, UploadError::Unreadable), "{err:?}");
         assert!(h.files().is_empty(), "{:?}", h.files());
+    }
+
+    #[test]
+    fn a_truncated_body_behind_a_good_header_is_unreadable_and_leaves_nothing() {
+        // The header decodes, so only decoding the pixels (the thumbnail
+        // made at upload) finds the damage.
+        let h = Harness::new();
+        let err = h
+            .upload(&h.ids.screws, &png_truncated_body(64, 64), None, false)
+            .unwrap_err();
+        assert!(matches!(err, UploadError::Unreadable), "{err:?}");
+        assert!(h.files().is_empty(), "{:?}", h.files());
+        let rows: i64 = attachments::table
+            .filter(attachments::entity_id.eq(&h.ids.screws))
+            .count()
+            .get_result(&mut h.db.pool.get().unwrap())
+            .unwrap();
+        assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn a_stored_upload_has_its_smallest_thumbnail_already() {
+        let h = Harness::new();
+        let stored = h
+            .upload(&h.ids.screws, &jpeg(640, 480), None, false)
+            .unwrap()
+            .attachment;
+        let thumb = attachment::thumbnail(&mut h.db.pool.get().unwrap(), &stored.id, 300)
+            .unwrap()
+            .expect("the 300px thumbnail is stored with the upload");
+        assert_eq!((thumb.width, thumb.height), (300, 225));
+        assert_eq!(thumb.mime_type, "image/webp");
     }
 
     #[test]
