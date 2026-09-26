@@ -8,6 +8,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard, PoisonError};
 
 use anyhow::{Context, Result, anyhow, ensure};
 use diesel::prelude::*;
+use diesel::sql_types::{Binary, Bool, Integer, Text, Timestamp};
 use tracing::warn;
 
 use crate::kinds::AttachmentKind;
@@ -126,19 +127,38 @@ pub fn thumbnail(
         .with_context(|| format!("loading the {size}px thumbnail of {sha256:?}"))
 }
 
+/// SQL that is true while any attachment or staged ingest photo references
+/// the sha256 bound as `?1`. [`is_shared`] and [`insert_thumbnail`] both use
+/// it, so what counts as a sharer cannot drift between them.
+const SHARER_EXISTS: &str = "(EXISTS (SELECT 1 FROM attachments WHERE sha256 = ?1) \
+     OR EXISTS (SELECT 1 FROM ingest_photos WHERE sha256 = ?1))";
+
 /// Stores `thumb` unless a row for its `(sha256, size)` already exists: the
-/// same bytes make the same thumbnail, so the first one stored wins.
+/// same bytes make the same thumbnail, so the first one stored wins. Nothing
+/// is stored once no row shares the sha: a thumbnail generated while the
+/// last sharer was deleted would otherwise outlive [`remove_original`]'s
+/// cleanup. The check and the insert are one statement, so no delete can
+/// commit between them.
 pub fn insert_thumbnail(conn: &mut SqliteConnection, thumb: &Thumbnail) -> Result<()> {
-    diesel::insert_into(thumbnails::table)
-        .values(thumb)
-        .on_conflict_do_nothing()
-        .execute(conn)
-        .with_context(|| {
-            format!(
-                "storing the {}px thumbnail of {:?}",
-                thumb.size, thumb.sha256
-            )
-        })?;
+    diesel::sql_query(format!(
+        "INSERT INTO thumbnails (sha256, size, mime_type, width, height, data, created_at) \
+         SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7 WHERE {SHARER_EXISTS} \
+         ON CONFLICT DO NOTHING"
+    ))
+    .bind::<Text, _>(&thumb.sha256)
+    .bind::<Integer, _>(thumb.size)
+    .bind::<Text, _>(&thumb.mime_type)
+    .bind::<Integer, _>(thumb.width)
+    .bind::<Integer, _>(thumb.height)
+    .bind::<Binary, _>(&thumb.data)
+    .bind::<Timestamp, _>(thumb.created_at)
+    .execute(conn)
+    .with_context(|| {
+        format!(
+            "storing the {}px thumbnail of {:?}",
+            thumb.size, thumb.sha256
+        )
+    })?;
     Ok(())
 }
 
@@ -158,8 +178,8 @@ fn require(conn: &mut SqliteConnection, id: &str) -> Result<Attachment> {
 /// Deletes attachment `id`. When it was its entity's primary photo, the
 /// earliest remaining photo that can be thumbnailed takes over, just as the
 /// first photo uploaded becomes primary. The original file and its
-/// thumbnails are removed once the row is gone, when no other attachment
-/// shares its hash.
+/// thumbnails are removed once the row is gone, when no other attachment or
+/// staged photo shares its hash.
 pub fn delete(conn: &mut SqliteConnection, data_dir: &Path, id: &str) -> Result<()> {
     let orphan = conn.transaction(|conn| {
         let row = require(conn, id)?;
@@ -205,17 +225,22 @@ pub(crate) fn delete_row(conn: &mut SqliteConnection, row: &Attachment) -> Resul
     diesel::delete(attachments::table.find(&row.id))
         .execute(conn)
         .with_context(|| format!("deleting attachment {:?}", row.id))?;
-    let sharers = sharing(conn, &row.sha256)?;
-    Ok((sharers == 0).then(|| row.sha256.clone()))
+    Ok((!is_shared(conn, &row.sha256)?).then(|| row.sha256.clone()))
 }
 
-/// How many attachments reference the original with `sha256`.
-fn sharing(conn: &mut SqliteConnection, sha256: &str) -> Result<i64> {
-    attachments::table
-        .filter(attachments::sha256.eq(sha256))
-        .count()
-        .get_result(conn)
-        .with_context(|| format!("counting attachments sharing {sha256:?}"))
+/// Whether any attachment or staged ingest photo references the original
+/// with `sha256`.
+fn is_shared(conn: &mut SqliteConnection, sha256: &str) -> Result<bool> {
+    #[derive(QueryableByName)]
+    struct Shared {
+        #[diesel(sql_type = Bool)]
+        shared: bool,
+    }
+    diesel::sql_query(format!("SELECT {SHARER_EXISTS} AS shared"))
+        .bind::<Text, _>(sha256)
+        .get_result::<Shared>(conn)
+        .map(|row| row.shared)
+        .with_context(|| format!("counting rows sharing {sha256:?}"))
 }
 
 /// Originals an upload is placing, by path, with how many uploads are placing
@@ -256,10 +281,10 @@ impl Drop for PlacingOriginal {
 }
 
 /// Removes the original with `sha256` from `data_dir`, and its thumbnail
-/// rows, unless an upload is placing it or an attachment references it.
-/// Both are checked under the placing lock, so an upload that committed its
-/// row after the caller's own sharer count still keeps its file and
-/// thumbnails. The caller's rows are already committed as deleted, so a
+/// rows, unless an upload is placing it or an attachment or staged ingest
+/// photo references it. Both are checked under the placing lock, so an upload
+/// that committed its row after the caller's own sharer count still keeps its
+/// file and thumbnails. The caller's rows are already committed as deleted, so a
 /// failure only leaks space: it is logged rather than reported, and an
 /// already-missing file is fine.
 pub(crate) fn remove_original(conn: &mut SqliteConnection, data_dir: &Path, sha256: &str) {
@@ -273,9 +298,9 @@ pub(crate) fn remove_original(conn: &mut SqliteConnection, data_dir: &Path, sha2
     if placing.contains_key(&path) {
         return;
     }
-    match sharing(conn, sha256) {
-        Ok(0) => {}
-        Ok(_) => return,
+    match is_shared(conn, sha256) {
+        Ok(false) => {}
+        Ok(true) => return,
         Err(err) => {
             warn!(%sha256, "not removing an original: {err:#}");
             return;
@@ -321,7 +346,10 @@ mod tests {
     use crate::db::TestDb;
     use crate::kinds::AttachmentKind;
     use crate::schema::attachments;
-    use crate::svc::fixtures::{SampleIds, attachment, seed_sample};
+    use crate::svc::fixtures::{
+        SampleIds, at, attachment, ingest_batch, ingest_photo, seed_sample,
+    };
+    use crate::svc::ingest;
 
     fn insert(conn: &mut SqliteConnection, row: Attachment) {
         diesel::insert_into(attachments::table)
@@ -462,6 +490,90 @@ mod tests {
         delete(&mut conn, data.path(), "a-screws-photo").unwrap();
         assert!(sizes(&mut conn).is_empty(), "an unshared thumbnail must go");
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn a_sha_shared_by_an_attachment_and_an_ingest_photo_survives_either_delete() {
+        // Review focus 1: either side keeps the file while the other holds it.
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let (data, photo_file) = data_with_drill_photo();
+        let manual_sha = "bb".repeat(32);
+        let manual_file = original_path(data.path(), &manual_sha);
+        fs::write(&manual_file, b"manual").unwrap();
+        let (_, item) = ingest_batch(&mut conn, None);
+        let staged_photo = ingest_photo(&mut conn, &item.id, &ids.photo_sha256, "image/jpeg");
+        let staged_manual = ingest_photo(&mut conn, &item.id, &manual_sha, "image/jpeg");
+        let has_thumbnail = |conn: &mut SqliteConnection| {
+            thumbnail(conn, &ids.photo_sha256, 500).unwrap().is_some()
+        };
+
+        // The attachment goes first: the staged photo keeps file and thumbnail.
+        delete(&mut conn, data.path(), &ids.photo).unwrap();
+        assert!(photo_file.exists());
+        assert!(has_thumbnail(&mut conn));
+        ingest::remove_photo(&mut conn, data.path(), &staged_photo.id).unwrap();
+        assert!(!photo_file.exists());
+        assert!(!has_thumbnail(&mut conn));
+
+        // The staged photo goes first: the attachment keeps the file.
+        ingest::remove_photo(&mut conn, data.path(), &staged_manual.id).unwrap();
+        assert!(manual_file.exists());
+        delete(&mut conn, data.path(), &ids.manual).unwrap();
+        assert!(!manual_file.exists());
+    }
+
+    #[test]
+    fn insert_thumbnail_refuses_a_row_with_no_sharer() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let data = tempfile::tempdir().unwrap();
+        let sha = "cc".repeat(32);
+        let row = |sha256: &str, size: i32| Thumbnail {
+            sha256: sha256.to_owned(),
+            size,
+            mime_type: "image/webp".to_owned(),
+            width: 4,
+            height: 3,
+            data: vec![7; 8],
+            created_at: at(20),
+        };
+
+        insert_thumbnail(&mut conn, &row(&sha, 300)).unwrap();
+        assert!(thumbnail(&mut conn, &sha, 300).unwrap().is_none());
+
+        // An attachment and a staged photo are each a sharer.
+        insert_thumbnail(&mut conn, &row(&ids.photo_sha256, 300)).unwrap();
+        assert_eq!(
+            thumbnail(&mut conn, &ids.photo_sha256, 300).unwrap(),
+            Some(row(&ids.photo_sha256, 300))
+        );
+        let (_, item) = ingest_batch(&mut conn, None);
+        let staged = ingest_photo(&mut conn, &item.id, &sha, "image/jpeg");
+        insert_thumbnail(&mut conn, &row(&sha, 300)).unwrap();
+        assert_eq!(
+            thumbnail(&mut conn, &sha, 300).unwrap(),
+            Some(row(&sha, 300))
+        );
+        // A second insert of the same key keeps the first row.
+        insert_thumbnail(
+            &mut conn,
+            &Thumbnail {
+                width: 9,
+                ..row(&sha, 300)
+            },
+        )
+        .unwrap();
+        assert_eq!(thumbnail(&mut conn, &sha, 300).unwrap().unwrap().width, 4);
+
+        // Once the sharer is gone, a late insert (a thumbnail generated while
+        // the delete ran) must not leave an orphan row behind.
+        ingest::remove_photo(&mut conn, data.path(), &staged.id).unwrap();
+        assert!(thumbnail(&mut conn, &sha, 300).unwrap().is_none());
+        insert_thumbnail(&mut conn, &row(&sha, 1200)).unwrap();
+        assert!(thumbnail(&mut conn, &sha, 1200).unwrap().is_none());
     }
 
     #[test]

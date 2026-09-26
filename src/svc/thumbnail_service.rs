@@ -219,7 +219,7 @@ mod tests {
 
     use super::*;
     use crate::db::TestDb;
-    use crate::svc::fixtures::jpeg;
+    use crate::svc::fixtures::{ingest_batch, ingest_photo, jpeg};
 
     const SHA: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
@@ -328,8 +328,12 @@ mod tests {
         let (svc, db, data) = service();
         let bad = "ee".repeat(32);
         write_undecodable(&data, &bad);
+        let mut conn = db.pool.get().unwrap();
+        // A thumbnail is stored only while a row shares its bytes.
+        let (_, item) = ingest_batch(&mut conn, None);
+        ingest_photo(&mut conn, &item.id, &bad, "image/jpeg");
         attachment::insert_thumbnail(
-            &mut db.pool.get().unwrap(),
+            &mut conn,
             &Thumbnail {
                 sha256: bad.clone(),
                 size: 500,
@@ -341,6 +345,7 @@ mod tests {
             },
         )
         .unwrap();
+        drop(conn);
         let [small, medium] = [300, 500].map(|px| thumbnail::allowed_size(px).unwrap());
 
         assert!(

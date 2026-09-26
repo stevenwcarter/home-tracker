@@ -420,7 +420,7 @@ mod tests {
     use crate::kinds::AttachmentKind;
     use crate::schema::{attachments, entities, entity_fields, tag_entities, thumbnails};
     use crate::svc::attachment::original_path;
-    use crate::svc::fixtures::{attachment, entity, seed_sample};
+    use crate::svc::fixtures::{attachment, entity, entity_input, seed_sample};
     use crate::svc::tag;
 
     fn names(rows: &[Entity]) -> Vec<&str> {
@@ -567,33 +567,6 @@ mod tests {
         assert_eq!(search(&mut conn, "Zeta", 0).unwrap().len(), 1);
     }
 
-    fn input(name: &str, type_id: &str, parent: Option<&str>) -> EntityInput {
-        EntityInput {
-            name: name.to_owned(),
-            description: None,
-            entity_type_id: type_id.to_owned(),
-            parent_id: parent.map(str::to_owned),
-            archived: false,
-            quantity: 1.0,
-            insured: false,
-            serial_number: None,
-            model_number: None,
-            manufacturer: None,
-            notes: None,
-            lifetime_warranty: false,
-            warranty_expires: None,
-            warranty_details: None,
-            purchase_date: None,
-            purchase_from: None,
-            purchase_price_cents: Cents(0),
-            sold_date: None,
-            sold_to: None,
-            sold_price_cents: Cents(0),
-            sold_notes: None,
-            tag_ids: None,
-        }
-    }
-
     /// `input` carrying `current`'s editable fields, for update tests.
     fn input_from(current: &Entity) -> EntityInput {
         EntityInput {
@@ -603,7 +576,7 @@ mod tests {
             purchase_price_cents: current.purchase_price_cents,
             sold_price_cents: current.sold_price_cents,
             sold_date: current.sold_date,
-            ..input(
+            ..entity_input(
                 &current.name,
                 &current.entity_type_id,
                 current.parent_id.as_deref(),
@@ -639,8 +612,12 @@ mod tests {
         let db = TestDb::new();
         let mut conn = db.pool.get().unwrap();
         let ids = seed_sample(&mut conn);
-        let first = create(&mut conn, input("Hammer", ITEM_TYPE_ID, Some(&ids.garage))).unwrap();
-        let second = create(&mut conn, input("Saw", ITEM_TYPE_ID, None)).unwrap();
+        let first = create(
+            &mut conn,
+            entity_input("Hammer", ITEM_TYPE_ID, Some(&ids.garage)),
+        )
+        .unwrap();
+        let second = create(&mut conn, entity_input("Saw", ITEM_TYPE_ID, None)).unwrap();
         assert_eq!(first.asset_id, AssetId(6));
         assert_eq!(second.asset_id, AssetId(7));
         assert_eq!(first.parent_id.as_deref(), Some(ids.garage.as_str()));
@@ -659,7 +636,7 @@ mod tests {
                 description: Some("   ".to_owned()),
                 notes: Some("  oiled ".to_owned()),
                 parent_id: Some(" ".to_owned()),
-                ..input("  Hammer \t", ITEM_TYPE_ID, None)
+                ..entity_input("  Hammer \t", ITEM_TYPE_ID, None)
             },
         )
         .unwrap();
@@ -669,7 +646,7 @@ mod tests {
         assert_eq!(created.parent_id, None);
 
         let before = entity_count(&mut conn);
-        let err = message(create(&mut conn, input(" \t ", ITEM_TYPE_ID, None)));
+        let err = message(create(&mut conn, entity_input(" \t ", ITEM_TYPE_ID, None)));
         assert_eq!(err, "name must not be blank");
         assert_eq!(entity_count(&mut conn), before);
     }
@@ -680,11 +657,11 @@ mod tests {
         let mut conn = db.pool.get().unwrap();
         seed_sample(&mut conn);
         let before = entity_count(&mut conn);
-        let err = message(create(&mut conn, input("Hammer", "missing", None)));
+        let err = message(create(&mut conn, entity_input("Hammer", "missing", None)));
         assert_eq!(err, "entity type not found");
         let err = message(create(
             &mut conn,
-            input("Hammer", ITEM_TYPE_ID, Some("missing")),
+            entity_input("Hammer", ITEM_TYPE_ID, Some("missing")),
         ));
         assert_eq!(err, "parent not found");
         assert_eq!(entity_count(&mut conn), before);
@@ -697,7 +674,7 @@ mod tests {
         let ids = seed_sample(&mut conn);
         let err = message(create(
             &mut conn,
-            input("Shelf", LOCATION_TYPE_ID, Some(&ids.drill)),
+            entity_input("Shelf", LOCATION_TYPE_ID, Some(&ids.drill)),
         ));
         assert_eq!(err, "a location cannot be placed under an item");
     }
@@ -709,7 +686,7 @@ mod tests {
         let ids = seed_sample(&mut conn);
         let bit = create(
             &mut conn,
-            input("Drill bit", ITEM_TYPE_ID, Some(&ids.drill)),
+            entity_input("Drill bit", ITEM_TYPE_ID, Some(&ids.drill)),
         )
         .unwrap();
         assert_eq!(bit.parent_id.as_deref(), Some(ids.drill.as_str()));
@@ -736,7 +713,7 @@ mod tests {
             &mut conn,
             EntityInput {
                 tag_ids: Some(vec![ids.tools.clone(), ids.electronics.clone()]),
-                ..input("Soldering iron", ITEM_TYPE_ID, None)
+                ..entity_input("Soldering iron", ITEM_TYPE_ID, None)
             },
         )
         .unwrap();
@@ -750,7 +727,7 @@ mod tests {
             &mut conn,
             EntityInput {
                 tag_ids: Some(vec!["missing".to_owned()]),
-                ..input("Multimeter", ITEM_TYPE_ID, None)
+                ..entity_input("Multimeter", ITEM_TYPE_ID, None)
             },
         ));
         assert_eq!(err, "tag not found");
@@ -895,7 +872,11 @@ mod tests {
         let db = TestDb::new();
         let mut conn = db.pool.get().unwrap();
         seed_sample(&mut conn);
-        let err = message(update(&mut conn, "missing", input("X", ITEM_TYPE_ID, None)));
+        let err = message(update(
+            &mut conn,
+            "missing",
+            entity_input("X", ITEM_TYPE_ID, None),
+        ));
         assert_eq!(err, "entity not found");
     }
 

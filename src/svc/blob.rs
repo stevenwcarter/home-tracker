@@ -1,6 +1,6 @@
 //! A stored original as the thumbnailer sees it: content hash and type only.
 
-use crate::models::Attachment;
+use crate::models::{Attachment, IngestPhoto};
 
 /// An original addressed by its content hash. Attachments are one kind of
 /// blob; anything else stored under `originals/` can be one too, so the
@@ -16,6 +16,15 @@ impl From<&Attachment> for Blob {
         Self {
             sha256: att.sha256.clone(),
             mime_type: att.mime_type.clone(),
+        }
+    }
+}
+
+impl From<&IngestPhoto> for Blob {
+    fn from(photo: &IngestPhoto) -> Self {
+        Self {
+            sha256: photo.sha256.clone(),
+            mime_type: photo.mime_type.clone(),
         }
     }
 }

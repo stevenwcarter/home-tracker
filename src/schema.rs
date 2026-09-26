@@ -101,6 +101,47 @@ diesel::table! {
 }
 
 diesel::table! {
+    ingest_batches (id) {
+        id -> Text,
+        parent_id -> Nullable<Text>,
+        status -> Text,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
+    ingest_items (id) {
+        id -> Text,
+        batch_id -> Text,
+        position -> Integer,
+        status -> Text,
+        error -> Nullable<Text>,
+        suggestion -> Nullable<Text>,
+        entity_id -> Nullable<Text>,
+        created_at -> Timestamp,
+        updated_at -> Timestamp,
+    }
+}
+
+diesel::table! {
+    ingest_photos (id) {
+        id -> Text,
+        item_id -> Text,
+        position -> Integer,
+        sha256 -> Text,
+        mime_type -> Text,
+        size_bytes -> BigInt,
+        title -> Text,
+        status -> Text,
+        error -> Nullable<Text>,
+        description -> Nullable<Text>,
+        suggested_kind -> Nullable<Text>,
+        created_at -> Timestamp,
+    }
+}
+
+diesel::table! {
     settings (key) {
         key -> Text,
         value -> Text,
@@ -160,6 +201,10 @@ diesel::joinable!(entities -> entity_types (entity_type_id));
 diesel::joinable!(entity_fields -> entities (entity_id));
 diesel::joinable!(entity_templates -> entities (location_id));
 diesel::joinable!(entity_types -> entity_templates (default_template_id));
+diesel::joinable!(ingest_batches -> entities (parent_id));
+diesel::joinable!(ingest_items -> entities (entity_id));
+diesel::joinable!(ingest_items -> ingest_batches (batch_id));
+diesel::joinable!(ingest_photos -> ingest_items (item_id));
 diesel::joinable!(tag_entities -> entities (entity_id));
 diesel::joinable!(tag_entities -> tags (tag_id));
 diesel::joinable!(template_fields -> entity_templates (template_id));
@@ -170,6 +215,9 @@ diesel::allow_tables_to_appear_in_same_query!(
     entity_fields,
     entity_templates,
     entity_types,
+    ingest_batches,
+    ingest_items,
+    ingest_photos,
     settings,
     tag_entities,
     tags,

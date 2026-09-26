@@ -9,6 +9,7 @@ pub mod entity;
 pub mod entity_field;
 pub mod entity_type;
 pub mod fixtures;
+pub mod ingest;
 pub mod settings;
 pub mod sniff;
 pub mod stats;

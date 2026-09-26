@@ -88,21 +88,92 @@ text_enum!(FieldKind, "field kind", {
     Time => "time",
 });
 
+text_enum!(IngestBatchStatus, "ingest batch status", {
+    Collecting => "collecting",
+    Processing => "processing",
+    Reviewing => "reviewing",
+    Done => "done",
+});
+
+text_enum!(IngestItemStatus, "ingest item status", {
+    Collecting => "collecting",
+    Queued => "queued",
+    Analysing => "analysing",
+    Ready => "ready",
+    Failed => "failed",
+    Accepted => "accepted",
+    Skipped => "skipped",
+});
+
+impl IngestItemStatus {
+    /// Whether the item waits for the user to accept or skip it.
+    pub fn is_reviewable(self) -> bool {
+        matches!(self, Self::Ready | Self::Failed)
+    }
+
+    /// Whether the item is finished with: accepted or skipped.
+    pub fn is_closed(self) -> bool {
+        matches!(self, Self::Accepted | Self::Skipped)
+    }
+}
+
+text_enum!(IngestPhotoStatus, "ingest photo status", {
+    Pending => "pending",
+    Described => "described",
+    Failed => "failed",
+});
+
+text_enum!(SuggestedKind, "suggested kind", {
+    Photo => "photo",
+    Receipt => "receipt",
+    Warranty => "warranty",
+    Manual => "manual",
+    Other => "other",
+});
+
+impl From<SuggestedKind> for AttachmentKind {
+    /// The attachment kind a photo classified as `kind` is stored as;
+    /// anything the model could not place becomes a plain attachment.
+    fn from(kind: SuggestedKind) -> Self {
+        match kind {
+            SuggestedKind::Photo => Self::Photo,
+            SuggestedKind::Receipt => Self::Receipt,
+            SuggestedKind::Warranty => Self::Warranty,
+            SuggestedKind::Manual => Self::Manual,
+            SuggestedKind::Other => Self::Attachment,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use juniper::ToInputValue;
-    use serde_json::Value;
 
     use super::*;
 
+    /// Asserts `check` for every variant of every text enum.
+    macro_rules! for_every_variant {
+        ($check:ident) => {
+            $check(AttachmentKind::ALL);
+            $check(FieldKind::ALL);
+            $check(IngestBatchStatus::ALL);
+            $check(IngestItemStatus::ALL);
+            $check(IngestPhotoStatus::ALL);
+            $check(SuggestedKind::ALL);
+        };
+    }
+
     #[test]
     fn round_trips_every_variant_through_text() {
-        for kind in AttachmentKind::ALL {
-            assert_eq!(kind.as_str().parse::<AttachmentKind>().unwrap(), *kind);
+        fn check<K: FromStr + PartialEq + fmt::Debug + fmt::Display>(all: &[K])
+        where
+            K::Err: fmt::Debug,
+        {
+            for kind in all {
+                assert_eq!(&kind.to_string().parse::<K>().unwrap(), kind);
+            }
         }
-        for kind in FieldKind::ALL {
-            assert_eq!(kind.as_str().parse::<FieldKind>().unwrap(), *kind);
-        }
+        for_every_variant!(check);
     }
 
     #[test]
@@ -118,19 +189,29 @@ mod tests {
 
     #[test]
     fn json_spells_every_variant_as_graphql_does() {
-        fn spellings(value: impl Serialize + ToInputValue) -> (Value, Value) {
-            let json = serde_json::to_value(&value).unwrap();
-            let graphql = serde_json::to_value(value.to_input_value()).unwrap();
-            (json, graphql)
+        fn check<K: Serialize + ToInputValue>(all: &[K]) {
+            for kind in all {
+                let json = serde_json::to_value(kind).unwrap();
+                let graphql = serde_json::to_value(kind.to_input_value()).unwrap();
+                assert_eq!(json, graphql);
+            }
         }
-        for kind in AttachmentKind::ALL {
-            let (json, graphql) = spellings(*kind);
-            assert_eq!(json, graphql);
-        }
-        for kind in FieldKind::ALL {
-            let (json, graphql) = spellings(*kind);
-            assert_eq!(json, graphql);
-        }
+        for_every_variant!(check);
+    }
+
+    #[test]
+    fn other_is_stored_as_a_plain_attachment() {
+        let stored: Vec<AttachmentKind> = SuggestedKind::ALL.iter().map(|&k| k.into()).collect();
+        assert_eq!(
+            stored,
+            [
+                AttachmentKind::Photo,
+                AttachmentKind::Receipt,
+                AttachmentKind::Warranty,
+                AttachmentKind::Manual,
+                AttachmentKind::Attachment,
+            ]
+        );
     }
 
     #[test]

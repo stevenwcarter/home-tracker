@@ -15,11 +15,16 @@ use image::{DynamicImage, ExtendedColorType, ImageEncoder, ImageFormat, Rgb, Rgb
 use crate::asset_id::AssetId;
 use crate::db::{ITEM_TYPE_ID, LOCATION_TYPE_ID};
 use crate::kinds::{AttachmentKind, FieldKind};
-use crate::models::{Attachment, Entity, EntityField, EntityType, Tag, TagEntity, Thumbnail};
+use crate::models::{
+    Attachment, Entity, EntityField, EntityType, IngestBatch, IngestItem, IngestPhoto, Tag,
+    TagEntity, Thumbnail,
+};
 use crate::money::Cents;
 use crate::schema::{
     attachments, entities, entity_fields, entity_types, tag_entities, tags, thumbnails,
 };
+use crate::svc::entity::EntityInput;
+use crate::svc::ingest;
 
 /// Ids of every row [`seed_sample`] inserts.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -109,6 +114,61 @@ pub fn attachment(
         created_at: at(seq),
         updated_at: at(seq),
     }
+}
+
+/// What a form would submit for a new entity `name` of `type_id` under
+/// `parent`: every optional field empty and quantity 1.
+pub fn entity_input(name: &str, type_id: &str, parent: Option<&str>) -> EntityInput {
+    EntityInput {
+        name: name.to_owned(),
+        description: None,
+        entity_type_id: type_id.to_owned(),
+        parent_id: parent.map(str::to_owned),
+        archived: false,
+        quantity: 1.0,
+        insured: false,
+        serial_number: None,
+        model_number: None,
+        manufacturer: None,
+        notes: None,
+        lifetime_warranty: false,
+        warranty_expires: None,
+        warranty_details: None,
+        purchase_date: None,
+        purchase_from: None,
+        purchase_price_cents: Cents(0),
+        sold_date: None,
+        sold_to: None,
+        sold_price_cents: Cents(0),
+        sold_notes: None,
+        tag_ids: None,
+    }
+}
+
+/// A new collecting ingest batch under `parent` and its first, empty item.
+pub fn ingest_batch(
+    conn: &mut SqliteConnection,
+    parent: Option<&str>,
+) -> (IngestBatch, IngestItem) {
+    let batch = ingest::create_batch(conn, parent).expect("create ingest batch");
+    let item = ingest::items(conn, &batch.id)
+        .expect("list ingest items")
+        .into_iter()
+        .next()
+        .expect("a new batch has an item");
+    (batch, item)
+}
+
+/// A pending staged photo of `item_id` with content hash `sha256`; the
+/// item's batch must still be collecting.
+pub fn ingest_photo(
+    conn: &mut SqliteConnection,
+    item_id: &str,
+    sha256: &str,
+    mime_type: &str,
+) -> IngestPhoto {
+    ingest::insert_photo_row(conn, item_id, sha256, mime_type, 3, "photo.jpg")
+        .expect("insert ingest photo")
 }
 
 fn tag(id: &str, name: &str, parent: Option<&str>, seq: i64) -> Tag {
