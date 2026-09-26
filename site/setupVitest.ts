@@ -58,21 +58,33 @@ if (typeof readGlobalLocalStorage() === 'undefined') {
 const fetchMocker = createFetchMock(vi);
 fetchMocker.enableMocks();
 
+// Default answer for every GraphQL operation, keyed by operation name, so
+// App-level tests can render without an Apollo mock of their own. Only
+// `summary` carries data worth asserting on; the rest are the empty shape a
+// fresh install would show.
+const DEFAULT_GRAPHQL_DATA: Record<string, unknown> = {
+  GetSummary: {
+    summary: {
+      totalValueCents: 1234567,
+      currency: 'USD',
+      totalItems: 42,
+      totalLocations: 7,
+      totalTags: 5,
+    },
+  },
+  GetLocations: { locations: [] },
+  GetRootItems: { rootItems: [] },
+  GetEntity: { entity: null },
+  Search: { search: [] },
+};
+
 beforeEach(() => {
   fetchMocker.resetMocks();
-  // Default GraphQL answer so App-level tests can render without Apollo mocks.
-  fetchMocker.mockIf(/\/graphql$/, async () => ({
-    body: JSON.stringify({
-      data: {
-        summary: {
-          totalValueCents: 1234567,
-          currency: 'USD',
-          totalItems: 42,
-          totalLocations: 7,
-          totalTags: 5,
-        },
-      },
-    }),
-    headers: { 'content-type': 'application/json' },
-  }));
+  fetchMocker.mockIf(/\/graphql$/, async (request) => {
+    const { operationName } = await request.json();
+    return {
+      body: JSON.stringify({ data: DEFAULT_GRAPHQL_DATA[operationName] ?? null }),
+      headers: { 'content-type': 'application/json' },
+    };
+  });
 });
