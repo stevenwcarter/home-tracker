@@ -81,6 +81,18 @@ const DEFAULT_GRAPHQL_DATA: Record<string, unknown> = {
   Search: { search: [] },
   GetEntityTypes: { entityTypes: [] },
   GetTags: { tags: [] },
+  GetAiSettings: {
+    aiSettings: {
+      baseUrl: 'https://api.openai.com/v1',
+      visionModel: 'gpt-5-mini',
+      synthesisModel: 'gpt-5-mini',
+      extraInstructions: null,
+      hasApiKey: false,
+      fromEnvironment: [],
+    },
+  },
+  GetOpenIngestBatches: { openIngestBatches: [] },
+  GetIngestBatch: { ingestBatch: null },
   DeleteEntity: { deleteEntity: true },
   DeleteEntityType: { deleteEntityType: true },
   DeleteTag: { deleteTag: true },

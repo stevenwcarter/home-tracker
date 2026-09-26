@@ -3,14 +3,9 @@ import { EntityForm } from 'components/EntityForm';
 import { PageSkeleton } from 'components/PageSkeleton';
 import { useCreateEntity } from 'hooks/useEntityMutations';
 import { useEntityTypes } from 'hooks/useEntityTypes';
-import { ITEM_TYPE_ID } from 'types/builtIns';
-import { EntityInput, EntityTypeDetail } from 'types/entity';
+import { itemType } from 'types/builtIns';
+import { EntityInput } from 'types/entity';
 import { entityPath } from 'utils/entityPath';
-
-/** The type a new entity starts as when the URL names none: the built-in Item, else a non-location "Item". */
-const defaultItemType = (types: EntityTypeDetail[]) =>
-  types.find((type) => type.id === ITEM_TYPE_ID) ??
-  types.find((type) => !type.isLocation && type.name === 'Item');
 
 /**
  * `/new` (top level) and `/locations/:id/new` (inside that location). An
@@ -23,7 +18,7 @@ export const NewEntityPage = () => {
   const [searchParams] = useSearchParams();
   const typeParam = searchParams.get('type');
   const { entityTypes, loading: typesLoading } = useEntityTypes();
-  const typeId = typeParam ?? defaultItemType(entityTypes)?.id;
+  const typeId = typeParam ?? itemType(entityTypes)?.id;
   const { create, loading } = useCreateEntity();
   const navigate = useNavigate();
 

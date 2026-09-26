@@ -364,3 +364,33 @@ describe('EntityForm', () => {
     }
   });
 });
+
+describe('EntityForm create from an initial input', () => {
+  it('starts from initialInput and saves it unchanged, amounts included', async () => {
+    const user = userEvent.setup();
+    const { onSubmit } = renderForm({ initialInput: DRILL_INPUT });
+    await loaded();
+    expect(screen.getByLabelText('Name')).toHaveValue('Drill');
+    expect(screen.getByLabelText('Purchase price')).toHaveValue('12.50');
+    await user.click(save());
+    expect(onSubmit).toHaveBeenCalledWith(DRILL_INPUT);
+  });
+
+  it('leaves a zero amount blank', async () => {
+    renderForm({ initialInput: { ...DRILL_INPUT, purchasePriceCents: 0, soldPriceCents: 0 } });
+    await loaded();
+    expect(screen.getByLabelText('Purchase price')).toHaveValue('');
+  });
+
+  it('takes a submit label and a secondary action in place of Cancel', async () => {
+    renderForm({
+      initialInput: DRILL_INPUT,
+      submitLabel: 'Save item',
+      secondaryAction: <button type="button">Skip</button>,
+    });
+    await loaded();
+    expect(screen.getByRole('button', { name: 'Save item' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Skip' })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Cancel' })).not.toBeInTheDocument();
+  });
+});

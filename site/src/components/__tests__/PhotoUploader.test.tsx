@@ -42,16 +42,38 @@ describe('PhotoUploader', () => {
     expect(screen.getByText('gallery goes here')).toBeInTheDocument();
   });
 
-  it('offers an image-only, multiple file input behind an Add photos button', async () => {
+  // `image/*` (HEIC never listed) is what makes phone browsers hand over a JPEG.
+  it('offers an image/*, multiple file input behind an Add photos button', async () => {
     const user = userEvent.setup();
     renderUploader();
     const input = screen.getByLabelText('Photo files');
     expect(input).toHaveAttribute('type', 'file');
-    expect(input).toHaveAttribute('accept', 'image/jpeg,image/png,image/gif,image/webp');
+    expect(input).toHaveAttribute('accept', 'image/*');
     expect(input).toHaveAttribute('multiple');
+    expect(input).not.toHaveAttribute('capture');
     const click = vi.spyOn(input, 'click');
     await user.click(screen.getByRole('button', { name: 'Add photos' }));
     expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it('offers the rear camera behind a Take photo button', async () => {
+    const user = userEvent.setup();
+    renderUploader();
+    const input = screen.getByLabelText('Camera photo');
+    expect(input).toHaveAttribute('type', 'file');
+    expect(input).toHaveAttribute('accept', 'image/*');
+    expect(input).toHaveAttribute('capture', 'environment');
+    const click = vi.spyOn(input, 'click');
+    await user.click(screen.getByRole('button', { name: 'Take photo' }));
+    expect(click).toHaveBeenCalledTimes(1);
+  });
+
+  it('uploads a photo taken with the camera', async () => {
+    const user = userEvent.setup();
+    renderUploader();
+    const shot = jpeg('camera.jpg');
+    await user.upload(screen.getByLabelText<HTMLInputElement>('Camera photo'), shot);
+    expect(upload).toHaveBeenCalledWith([shot]);
   });
 
   it('selecting two files calls upload once with both, then clears the input', async () => {

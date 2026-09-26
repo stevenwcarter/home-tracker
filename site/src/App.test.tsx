@@ -15,6 +15,7 @@ beforeAll(async () => {
     import('page/EditEntityPage'),
     import('page/EntityTypesPage'),
     import('page/TagsPage'),
+    import('page/IngestPage'),
   ]);
 });
 
@@ -69,6 +70,13 @@ describe('App', () => {
     window.history.pushState({}, '', path);
     render(<App />);
     expect(await screen.findByRole('heading', { level: 1, name: heading })).toBeInTheDocument();
+  });
+
+  it('routes /ingest/:batchId to the ingest page (Not found for an unknown batch)', async () => {
+    window.history.pushState({}, '', '/ingest/unknown');
+    render(<App />);
+    expect(await screen.findByRole('heading', { level: 1, name: 'Not found' })).toBeInTheDocument();
+    expect(screen.getByText("That batch doesn't exist.")).toBeInTheDocument();
   });
 
   it.each(['/items/unknown/edit', '/locations/unknown/edit'])(

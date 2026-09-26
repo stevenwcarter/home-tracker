@@ -14,6 +14,7 @@ import { entityDetail, listItem, locationSummary, SUMMARY } from 'test/entityFix
 import { typesMock } from 'test/formFixtures';
 import { entityMock, spiedMock, summaryMock as summary } from 'test/pageMocks';
 import { renderRoute } from 'test/renderRoute';
+import { aiSettingsMock } from 'test/aiFixtures';
 import { AttachmentKind, AttachmentRef, EntityFieldRef, FieldKind } from 'types/entity';
 
 vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
@@ -85,6 +86,19 @@ const drill = entityDetail({
 });
 
 describe('ItemPage', () => {
+  it('offers "Add item(s) with AI" when a key is set', async () => {
+    renderRoute('/items/drill', [entityMock('drill', drill), summaryMock, aiSettingsMock()]);
+    expect(await screen.findByRole('button', { name: 'Add item(s) with AI' })).toBeInTheDocument();
+  });
+
+  it('offers "Set up AI" when no key is set', async () => {
+    renderRoute('/items/drill', [entityMock('drill', drill), summaryMock]);
+    expect(await screen.findByRole('link', { name: 'Set up AI' })).toHaveAttribute(
+      'href',
+      '/settings/ai',
+    );
+  });
+
   it('renders a value for every FieldKind and every AttachmentKind', async () => {
     const field = (kind: FieldKind, values: Partial<EntityFieldRef>) =>
       ({

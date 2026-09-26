@@ -6,6 +6,7 @@ import { entityDetail, listItem, locationSummary } from 'test/entityFixtures';
 import { typesMock } from 'test/formFixtures';
 import { entityMock, spiedMock, summaryMock as summary } from 'test/pageMocks';
 import { renderRoute } from 'test/renderRoute';
+import { aiSettingsMock } from 'test/aiFixtures';
 
 vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
 import { toast } from 'react-toastify';
@@ -40,6 +41,24 @@ const garage = entityDetail(
 const emptyGarage = { ...garage, childLocations: [], items: [] };
 
 describe('LocationPage', () => {
+  it('offers "Add item(s) with AI" when a key is set', async () => {
+    renderRoute('/locations/garage', [
+      entityMock('garage', garage),
+      summaryMock,
+      typesMock(),
+      aiSettingsMock(),
+    ]);
+    expect(await screen.findByRole('button', { name: 'Add item(s) with AI' })).toBeInTheDocument();
+  });
+
+  it('offers "Set up AI" when no key is set', async () => {
+    renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock, typesMock()]);
+    expect(await screen.findByRole('link', { name: 'Set up AI' })).toHaveAttribute(
+      'href',
+      '/settings/ai',
+    );
+  });
+
   it('shows a loading skeleton, then breadcrumbs, heading, child locations and items', async () => {
     renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock, typesMock()]);
     expect(screen.getByLabelText('Loading location')).toBeInTheDocument();

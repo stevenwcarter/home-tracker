@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatDate, formatDateTime } from '../date';
+import { formatDate, formatDateTime, timeAgo } from '../date';
 
 describe('formatDate', () => {
   it('formats a date-only string as a short en-US calendar date', () => {
@@ -25,5 +25,27 @@ describe('formatDateTime', () => {
 
   it('returns the input unchanged when it is not a timestamp', () => {
     expect(formatDateTime('never')).toBe('never');
+  });
+});
+
+describe('timeAgo', () => {
+  const now = new Date('2026-09-26T12:00:00Z');
+
+  it.each([
+    ['2026-09-26T11:59:30Z', 'just now'],
+    ['2026-09-26T11:59:00Z', '1 minute ago'],
+    ['2026-09-26T11:15:00Z', '45 minutes ago'],
+    ['2026-09-26T11:00:00Z', '1 hour ago'],
+    ['2026-09-26T02:00:00Z', '10 hours ago'],
+    ['2026-09-25T12:00:00Z', '1 day ago'],
+    ['2026-09-19T12:00:00Z', '7 days ago'],
+    // A clock a little ahead of ours is still "just now", never "in the future".
+    ['2026-09-26T12:00:30Z', 'just now'],
+  ])('%s is %s', (value, expected) => {
+    expect(timeAgo(value, now)).toBe(expected);
+  });
+
+  it('returns unparseable input as is', () => {
+    expect(timeAgo('not a date', now)).toBe('not a date');
   });
 });

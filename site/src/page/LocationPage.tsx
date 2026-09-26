@@ -1,5 +1,6 @@
 import { Link, Navigate, useParams } from 'react-router-dom';
 import { Breadcrumbs } from 'components/Breadcrumbs';
+import { AiEntry } from 'components/ingest/AiEntry';
 import { DANGER_ACTION, PRIMARY_ACTION, SECONDARY_ACTION } from 'components/buttonStyles';
 import { EntityList } from 'components/EntityList';
 import { LocationCards } from 'components/LocationCards';
@@ -73,6 +74,7 @@ export const LocationPage = () => {
           </button>
         </div>
       </div>
+      <AiEntry parentId={entity.id} />
       {entity.description && (
         <p className="mt-2 whitespace-pre-line text-muted">{entity.description}</p>
       )}

@@ -17,6 +17,7 @@ const EditEntityPage = React.lazy(() => import('page/EditEntityPage'));
 const EntityTypesPage = React.lazy(() => import('page/EntityTypesPage'));
 const TagsPage = React.lazy(() => import('page/TagsPage'));
 const SettingsPage = React.lazy(() => import('page/SettingsPage'));
+const IngestPage = React.lazy(() => import('page/IngestPage'));
 
 const apolloClient = new ApolloClient({
   cache: new InMemoryCache(),
@@ -39,6 +40,7 @@ const routes: RouteObject[] = [
       { path: 'tags', element: <TagsPage /> },
       { path: 'settings', element: <Navigate to="/settings/ai" replace /> },
       { path: 'settings/:tab', element: <SettingsPage /> },
+      { path: 'ingest/:batchId', element: <IngestPage /> },
       { path: 'search', element: <SearchPage /> },
       { path: '*', element: <NotFound /> },
     ],

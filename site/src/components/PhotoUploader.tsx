@@ -4,8 +4,12 @@ import { toast } from 'react-toastify';
 import { UploadProgress, UploadStatus, UploadTarget, useUploadPhoto } from 'hooks/useUploadPhoto';
 import { SECONDARY_ACTION } from './buttonStyles';
 
-/** The formats the server accepts (it sniffs the bytes; this only filters the picker). */
-const ACCEPTED_TYPES = 'image/jpeg,image/png,image/gif,image/webp';
+/**
+ * Any image: the server sniffs the bytes and refuses what it cannot store.
+ * `image/*` (with HEIC never listed) is also what makes a phone browser
+ * transcode a HEIC photo to JPEG before handing it over.
+ */
+const ACCEPTED_TYPES = 'image/*';
 
 const STATUS_TEXT: Record<Exclude<UploadStatus, 'error'>, string> = {
   queued: 'Waiting',
@@ -27,9 +31,11 @@ const StatusRow = ({ entry }: { entry: UploadProgress }) => (
 );
 
 /**
- * Adds photos to `target` (an entity, or a staged AI ingest item): an `Add photos` button over a hidden multi-file
- * image input, and the whole region (wrapped around `children`, the gallery)
- * as a drop target. The latest batch's per-file status is listed below. Files
+ * Adds photos to `target` (an entity, or a staged AI ingest item): an `Add
+ * photos` button over a hidden multi-file image input, a `Take photo` button
+ * over a rear-camera input (`capture="environment"`; a desktop browser just
+ * opens its file picker), and the whole region (wrapped around `children`,
+ * the gallery) as a drop target. The latest batch's per-file status is listed below. Files
  * dropped while a batch is still uploading are refused with a toast. Pages key
  * it by the target's id so its status never follows navigation to another one.
  */
@@ -42,6 +48,7 @@ export const PhotoUploader = ({
 }) => {
   const { upload, uploading, progress } = useUploadPhoto(target);
   const inputRef = useRef<HTMLInputElement>(null);
+  const cameraRef = useRef<HTMLInputElement>(null);
   const [dragging, setDragging] = useState(false);
 
   const send = (files: File[]) => {
@@ -99,6 +106,14 @@ export const PhotoUploader = ({
         >
           {uploading ? 'Uploading…' : 'Add photos'}
         </button>
+        <button
+          type="button"
+          onClick={() => cameraRef.current?.click()}
+          disabled={uploading}
+          className={SECONDARY_ACTION}
+        >
+          Take photo
+        </button>
         <span className="text-sm text-muted">or drop images here (JPEG, PNG, GIF, WebP)</span>
         <input
           ref={inputRef}
@@ -106,6 +121,17 @@ export const PhotoUploader = ({
           accept={ACCEPTED_TYPES}
           multiple
           aria-label="Photo files"
+          tabIndex={-1}
+          disabled={uploading}
+          onChange={onChoose}
+          className="sr-only"
+        />
+        <input
+          ref={cameraRef}
+          type="file"
+          accept={ACCEPTED_TYPES}
+          capture="environment"
+          aria-label="Camera photo"
           tabIndex={-1}
           disabled={uploading}
           onChange={onChoose}

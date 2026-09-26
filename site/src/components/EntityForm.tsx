@@ -14,9 +14,26 @@ type EntityFormProps = {
   submitting: boolean;
   /** Where Cancel leads; defaults to the entity's page, or the default parent's (else home) on create. */
   cancelTo?: string;
+  /** The submit button's text; "Save" unless given. */
+  submitLabel?: string;
+  /** Shown in place of the Cancel link (the AI review's Skip). */
+  secondaryAction?: ReactNode;
 } & (
-  | { mode: 'create'; initial?: undefined; defaultParentId?: string; defaultTypeId?: string }
-  | { mode: 'edit'; initial: EntityDetail; defaultParentId?: undefined; defaultTypeId?: undefined }
+  | {
+      mode: 'create';
+      initial?: undefined;
+      /** A complete input to start from (an AI suggestion), instead of the defaults below. */
+      initialInput?: EntityInput;
+      defaultParentId?: string;
+      defaultTypeId?: string;
+    }
+  | {
+      mode: 'edit';
+      initial: EntityDetail;
+      initialInput?: undefined;
+      defaultParentId?: undefined;
+      defaultTypeId?: undefined;
+    }
 );
 
 /** Every field at its default, for a new entity. */
@@ -139,12 +156,17 @@ export const EntityForm = (props: EntityFormProps) => {
   const [input, setInput] = useState<EntityInput>(() =>
     initial
       ? toEntityInput(initial)
-      : blankInput(props.defaultTypeId ?? '', props.defaultParentId ?? null),
+      : (props.initialInput ??
+        blankInput(props.defaultTypeId ?? '', props.defaultParentId ?? null)),
   );
-  const [money, setMoney] = useState<Record<MoneyKey, string>>(() => ({
-    purchasePriceCents: initial ? formatMoneyInput(initial.purchasePriceCents) : '',
-    soldPriceCents: initial ? formatMoneyInput(initial.soldPriceCents) : '',
-  }));
+  // An edit shows every amount; a new entity leaves a zero amount blank.
+  const [money, setMoney] = useState<Record<MoneyKey, string>>(() => {
+    const shown = (cents: number) => (initial || cents !== 0 ? formatMoneyInput(cents) : '');
+    return {
+      purchasePriceCents: shown(input.purchasePriceCents),
+      soldPriceCents: shown(input.soldPriceCents),
+    };
+  });
   const [quantityText, setQuantityText] = useState(() => String(input.quantity));
   const [nameTouched, setNameTouched] = useState(false);
   // Sections the user has opened or closed; the rest follow the type's default.
@@ -351,18 +373,20 @@ export const EntityForm = (props: EntityFormProps) => {
       </Fieldset>
 
       <div className="flex items-center justify-end gap-3">
-        <Link
-          to={props.cancelTo ?? defaultCancelTo(props)}
-          className="rounded-md px-3 py-1.5 text-sm text-muted hover:text-text"
-        >
-          Cancel
-        </Link>
+        {props.secondaryAction ?? (
+          <Link
+            to={props.cancelTo ?? defaultCancelTo(props)}
+            className="rounded-md px-3 py-1.5 text-sm text-muted hover:text-text"
+          >
+            Cancel
+          </Link>
+        )}
         <button
           type="submit"
           disabled={invalid || submitting}
           className="rounded-md bg-accent px-4 py-1.5 text-sm font-medium text-accent-text disabled:opacity-50"
         >
-          Save
+          {props.submitLabel ?? 'Save'}
         </button>
       </div>
     </form>

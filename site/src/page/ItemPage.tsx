@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import { Link, Navigate, useParams } from 'react-router-dom';
 import { Breadcrumbs } from 'components/Breadcrumbs';
+import { AiEntry } from 'components/ingest/AiEntry';
 import {
   DANGER_ACTION,
   ROW_ACTION,
@@ -181,6 +182,7 @@ export const ItemPage = () => {
           </button>
         </div>
       </div>
+      <AiEntry parentId={entity.id} />
       <div className="mt-6 grid grid-cols-1 gap-8 lg:grid-cols-2">
         {photo && (
           <figure aria-label="Featured photo">

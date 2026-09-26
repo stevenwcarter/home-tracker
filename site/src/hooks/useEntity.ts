@@ -7,8 +7,12 @@ interface EntityResponse {
   entity: EntityDetail | null;
 }
 
-export const useEntity = (id: string) => {
-  const { data, loading, error } = useQuery<EntityResponse>(GET_ENTITY, { variables: { id } });
+/** Entity `id`; `skip` runs no query (the entity stays null), for a caller with no id to look up. */
+export const useEntity = (id: string, { skip = false }: { skip?: boolean } = {}) => {
+  const { data, loading, error } = useQuery<EntityResponse>(GET_ENTITY, {
+    variables: { id },
+    skip,
+  });
   useErrorToast(error, 'Error loading');
   const entity = data?.entity ?? null;
   const notFound = !loading && !error && data !== undefined && data.entity === null;

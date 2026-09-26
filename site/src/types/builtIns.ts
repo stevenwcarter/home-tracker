@@ -16,3 +16,8 @@ export const locationType = (types: EntityTypeDetail[]) =>
   types.find((type) => type.id === LOCATION_TYPE_ID && type.isLocation) ??
   types.find((type) => type.isLocation && type.name === 'Location') ??
   types.find((type) => type.isLocation);
+
+/** The type a new item starts as: the built-in Item, else a non-location type named "Item". */
+export const itemType = (types: EntityTypeDetail[]) =>
+  types.find((type) => type.id === ITEM_TYPE_ID) ??
+  types.find((type) => !type.isLocation && type.name === 'Item');

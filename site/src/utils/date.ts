@@ -29,3 +29,26 @@ export function formatDateTime(value: string): string {
     ? value
     : date.toLocaleString(LOCALE, { ...DATE_OPTIONS, hour: 'numeric', minute: '2-digit' });
 }
+
+const MINUTE = 60_000;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+
+/**
+ * How long ago an ISO timestamp was, coarsely: "just now" under a minute (or
+ * slightly in the future, a clock ahead of ours), then whole minutes, hours
+ * or days ("3 hours ago"). Unparseable input is returned as is.
+ */
+export function timeAgo(value: string, now: Date = new Date()): string {
+  const then = new Date(value).getTime();
+  if (Number.isNaN(then)) return value;
+  const elapsed = now.getTime() - then;
+  const [count, unit] =
+    elapsed >= DAY
+      ? [Math.floor(elapsed / DAY), 'day']
+      : elapsed >= HOUR
+        ? [Math.floor(elapsed / HOUR), 'hour']
+        : [Math.floor(elapsed / MINUTE), 'minute'];
+  if (count < 1) return 'just now';
+  return `${count} ${unit}${count === 1 ? '' : 's'} ago`;
+}
