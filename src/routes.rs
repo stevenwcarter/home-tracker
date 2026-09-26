@@ -155,8 +155,9 @@ fn routes(
     // under their sha256 ETag, and photos gain nothing from re-encoding.
     // Pinned by tests/attachments.rs. Uploads answer small JSON bodies. The
     // ingest routes are both, a staging upload and staged originals, plus
-    // the progress stream, which a compressor would buffer (pinned by
-    // tests/ingest_events.rs).
+    // the progress stream. (tower-http's default predicate would skip
+    // `text/event-stream` inside the compressed router too, so
+    // tests/ingest_events.rs pins the uncompressed response, not this mount.)
     let upload_dir = Arc::new(thumbnails.data_dir().to_path_buf());
     let router = Router::new()
         .merge(upload_routes(pool.clone(), Arc::clone(&upload_dir)))

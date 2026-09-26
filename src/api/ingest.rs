@@ -196,15 +196,23 @@ async fn progress(
     State(IngestState { pool, events, .. }): State<IngestState>,
 ) -> Result<Response, AppError> {
     let receiver = events.subscribe(&id);
-    let batch = {
+    let batch_id = id.clone();
+    let loaded = task::spawn_blocking(move || {
         let mut conn = pool.get().context("db connection")?;
-        ingest::get_batch(&mut conn, &id)?
-    };
-    let Some(batch) = batch else {
-        // Nobody else can be watching a batch that does not exist; closing
-        // drops the channel this request opened.
-        events.close(&id);
-        return Ok(StatusCode::NOT_FOUND.into_response());
+        ingest::get_batch(&mut conn, &batch_id)
+    })
+    .await
+    .context("the batch load task failed")
+    .and_then(|loaded| loaded);
+    let batch = match loaded {
+        Ok(Some(batch)) => batch,
+        // Nobody else can be watching a batch that does not exist, and a
+        // failed load answers with an error; either way, closing drops the
+        // channel this request opened.
+        missing_or_failed => {
+            events.close(&id);
+            return Ok(missing_or_failed.map(|_| StatusCode::NOT_FOUND.into_response())?);
+        }
     };
     let done = batch.status == IngestBatchStatus::Done;
     if done {

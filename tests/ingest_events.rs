@@ -12,17 +12,18 @@ use axum::body::{self, Body, BodyDataStream};
 use axum::http::request::Builder;
 use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
+use chrono::{TimeDelta, Utc};
 use diesel::prelude::*;
 use home_tracker::ai::AiState;
 use home_tracker::ai::env::AiEnv;
 use home_tracker::ai::fake::FakeAiClient;
 use home_tracker::db::{ITEM_TYPE_ID, TestDb};
-use home_tracker::kinds::IngestBatchStatus;
+use home_tracker::kinds::{IngestBatchStatus, IngestItemStatus};
 use home_tracker::models::{IngestBatch, IngestItem, IngestPhoto};
-use home_tracker::routes::app_with_ai;
+use home_tracker::routes::{app_with_ai, app_with_runner};
 use home_tracker::schema::ingest_batches;
-use home_tracker::svc::attachment;
 use home_tracker::svc::fixtures::{self, jpeg, seed_sample};
+use home_tracker::svc::{attachment, ingest};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -32,6 +33,8 @@ use tower::ServiceExt;
 
 /// How long a test waits for the next event or the end of a stream.
 const EVENT_BOUND: Duration = Duration::from_secs(10);
+/// How long a stream that should stay open is watched for events.
+const QUIET: Duration = Duration::from_millis(200);
 
 /// One parsed server-sent event.
 #[derive(Debug, PartialEq)]
@@ -56,19 +59,32 @@ impl EventReader {
 
     /// The next event (comments skipped), or `None` once the stream ends.
     async fn next(&mut self) -> Option<Sse> {
+        self.next_within(EVENT_BOUND)
+            .await
+            .expect("no event or end of stream in time")
+    }
+
+    /// Whether nothing, not even the end, arrives for a little while.
+    async fn stays_quiet(&mut self) -> bool {
+        self.next_within(QUIET).await.is_none()
+    }
+
+    /// The next event or the end (`Some(None)`) within `bound` of waiting
+    /// for a chunk; `None` when a wait runs out.
+    async fn next_within(&mut self, bound: Duration) -> Option<Option<Sse>> {
         loop {
             if let Some(end) = self.buffer.find("\n\n") {
                 let block: String = self.buffer.drain(..end + 2).collect();
-                match parse_block(&block) {
-                    Some(event) => return Some(event),
-                    None => continue,
+                if let Some(event) = parse_block(&block) {
+                    return Some(Some(event));
                 }
+                continue;
             }
-            let chunk = time::timeout(EVENT_BOUND, self.body.next())
-                .await
-                .expect("no event or end of stream in time")?
-                .expect("the body failed");
-            self.buffer.push_str(str::from_utf8(&chunk).unwrap());
+            let Some(chunk) = time::timeout(bound, self.body.next()).await.ok()? else {
+                return Some(None);
+            };
+            self.buffer
+                .push_str(str::from_utf8(&chunk.expect("the body failed")).unwrap());
         }
     }
 }
@@ -131,6 +147,25 @@ impl Fixture {
         fs::write(path, bytes).unwrap();
         let photo = fixtures::ingest_photo(&mut conn, &item.id, &sha256, "image/jpeg");
         (batch, item, photo)
+    }
+
+    /// A reviewing batch of `items` items, each with a staged photo and
+    /// `status` (ready or failed), analysed without the runner.
+    fn reviewing(&self, items: usize, status: IngestItemStatus) -> (IngestBatch, Vec<IngestItem>) {
+        let mut conn = self.db.pool.get().unwrap();
+        let (batch, first) = fixtures::ingest_batch(&mut conn, None);
+        let mut all = vec![first];
+        all.extend((1..items).map(|_| ingest::add_item(&mut conn, &batch.id).unwrap()));
+        for (n, item) in all.iter().enumerate() {
+            fixtures::ingest_photo(&mut conn, &item.id, &format!("{n:064x}"), "image/jpeg");
+        }
+        ingest::submit(&mut conn, &batch.id).unwrap();
+        for item in &all {
+            ingest::set_item_status(&mut conn, &item.id, status, None).unwrap();
+        }
+        let batch = ingest::settle_batch(&mut conn, &batch.id).unwrap();
+        assert_eq!(batch.status, IngestBatchStatus::Reviewing);
+        (batch, all)
     }
 
     async fn request(&self, request: Request<Body>) -> Response {
@@ -214,6 +249,9 @@ async fn events_stream_photo_item_and_batch_and_ends_on_done() {
     )
     .await;
 
+    // The accepted item, the batch now done, then the end.
+    assert_eq!(stream.next().await, Some(event("item", &item.id)));
+    assert_eq!(stream.next().await, Some(event("batch", &batch.id)));
     assert_eq!(stream.next().await, None, "accepting the last item ends it");
 }
 
@@ -267,4 +305,79 @@ async fn stream_is_not_compressed() {
         "{:?}",
         response.headers()
     );
+}
+
+const SKIP: &str = "mutation($id: ID!) { skipIngestItem(id: $id) { id } }";
+
+#[tokio::test]
+async fn skipping_one_of_two_items_keeps_the_stream_open() {
+    let f = Fixture::new();
+    let (batch, items) = f.reviewing(2, IngestItemStatus::Ready);
+    let mut stream = EventReader::new(f.events(&batch.id).await);
+
+    f.graphql(SKIP, json!({ "id": items[0].id })).await;
+
+    assert_eq!(stream.next().await, Some(event("item", &items[0].id)));
+    assert!(stream.stays_quiet().await, "the batch is still reviewing");
+
+    f.graphql(SKIP, json!({ "id": items[1].id })).await;
+
+    assert_eq!(stream.next().await, Some(event("item", &items[1].id)));
+    assert_eq!(stream.next().await, Some(event("batch", &batch.id)));
+    assert_eq!(stream.next().await, None);
+}
+
+#[tokio::test]
+async fn retrying_publishes_the_item_and_the_reopened_batch() {
+    let f = Fixture::new();
+    let (batch, items) = f.reviewing(1, IngestItemStatus::Failed);
+    let mut stream = EventReader::new(f.events(&batch.id).await);
+
+    f.graphql(
+        "mutation($id: ID!) { retryIngestItem(id: $id) { id } }",
+        json!({ "id": items[0].id }),
+    )
+    .await;
+
+    // Queued, and the batch back to processing; the runner's own events
+    // follow.
+    assert_eq!(stream.next().await, Some(event("item", &items[0].id)));
+    assert_eq!(stream.next().await, Some(event("batch", &batch.id)));
+}
+
+#[tokio::test]
+async fn deleting_a_batch_ends_its_stream() {
+    let f = Fixture::new();
+    let (batch, _, _) = f.collecting();
+    let mut stream = EventReader::new(f.events(&batch.id).await);
+
+    f.graphql(
+        "mutation($id: ID!) { deleteIngestBatch(id: $id) }",
+        json!({ "id": batch.id }),
+    )
+    .await;
+
+    assert_eq!(stream.next().await, None);
+}
+
+#[tokio::test]
+async fn cleanup_ends_the_streams_of_the_batches_it_deletes() {
+    let db = TestDb::new();
+    let data = tempfile::tempdir().unwrap();
+    let (batch, _) = fixtures::ingest_batch(&mut db.pool.get().unwrap(), None);
+    diesel::update(ingest_batches::table.find(&batch.id))
+        .set(ingest_batches::updated_at.eq(Utc::now().naive_utc() - TimeDelta::days(8)))
+        .execute(&mut db.pool.get().unwrap())
+        .unwrap();
+    let (app, runner) = app_with_runner(db.pool.clone(), data.path().to_path_buf());
+    let response = app
+        .oneshot(events_request(&batch.id).body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let mut stream = EventReader::new(response);
+
+    assert_eq!(runner.cleanup_stale().await.unwrap(), 1);
+
+    assert_eq!(stream.next().await, None);
 }

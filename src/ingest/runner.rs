@@ -170,15 +170,17 @@ impl IngestRunner {
         Ok(count)
     }
 
-    /// Deletes every batch idle for [`STALE_AFTER`] and logs how many went.
+    /// Deletes every batch idle for [`STALE_AFTER`], ends their progress
+    /// streams, and logs how many went.
     pub async fn cleanup_stale(&self) -> Result<usize> {
         let data_dir = self.thumbnails.data_dir().to_path_buf();
         let cutoff = Utc::now().naive_utc() - STALE_AFTER;
         let removed = self
             .db(move |conn| ingest::cleanup_stale(conn, &data_dir, cutoff))
             .await?;
-        info!(removed, "removed abandoned ingest batches");
-        Ok(removed)
+        removed.iter().for_each(|id| self.events.close(id));
+        info!(removed = removed.len(), "removed abandoned ingest batches");
+        Ok(removed.len())
     }
 
     /// Runs [`Self::cleanup_stale`] every [`CLEANUP_EVERY`], starting one

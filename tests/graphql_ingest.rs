@@ -16,7 +16,7 @@ use home_tracker::ai::env::AiEnv;
 use home_tracker::ai::fake::FakeAiClient;
 use home_tracker::db::{ITEM_TYPE_ID, TestDb};
 use home_tracker::graphql::context::{Actor, Role};
-use home_tracker::kinds::IngestBatchStatus;
+use home_tracker::kinds::{IngestBatchStatus, IngestItemStatus};
 use home_tracker::models::{Entity, IngestBatch, IngestItem, IngestPhoto};
 use home_tracker::routes::{app_with_actor, app_with_ai};
 use home_tracker::schema::{entities, ingest_batches, ingest_items, ingest_photos};
@@ -469,10 +469,17 @@ async fn open_batches_lists_only_unfinished_ones_for_the_parent() {
     let (newer, _) = f.create(Some(&f.ids.garage)).await;
     let (elsewhere, _) = f.create(Some(&f.ids.house)).await;
     let (parentless, _) = f.create(None).await;
-    diesel::update(ingest_batches::table.find(&finished))
-        .set(ingest_batches::status.eq(IngestBatchStatus::Done))
-        .execute(&mut f.conn())
-        .unwrap();
+    // Every status but done counts as open.
+    for (id, status) in [
+        (&older, IngestBatchStatus::Processing),
+        (&finished, IngestBatchStatus::Done),
+        (&newer, IngestBatchStatus::Reviewing),
+    ] {
+        diesel::update(ingest_batches::table.find(id))
+            .set(ingest_batches::status.eq(status))
+            .execute(&mut f.conn())
+            .unwrap();
+    }
 
     assert_eq!(f.open_batches(Some(&f.ids.garage)).await, [newer, older]);
     assert_eq!(f.open_batches(Some(&f.ids.house)).await, [elsewhere]);
@@ -569,4 +576,68 @@ async fn accept_of_a_queued_item_is_refused() {
     );
     assert_eq!(snapshot(&mut f.conn()), before);
     assert_eq!(f.batch(&batch.id).await["items"][0]["status"], "QUEUED");
+}
+
+#[tokio::test]
+async fn accept_with_a_photo_of_another_item_is_refused() {
+    let f = Fixture::new();
+    let (item, foreign) = {
+        let mut conn = f.conn();
+        let (batch, item) = fixtures::ingest_batch(&mut conn, None);
+        fixtures::ingest_photo(&mut conn, &item.id, &"cc".repeat(32), "image/jpeg");
+        let (_, other) = fixtures::ingest_batch(&mut conn, None);
+        let foreign = fixtures::ingest_photo(&mut conn, &other.id, &"dd".repeat(32), "image/jpeg");
+        ingest::submit(&mut conn, &batch.id).unwrap();
+        ingest::set_item_status(&mut conn, &item.id, IngestItemStatus::Ready, None).unwrap();
+        (item, foreign)
+    };
+    let before = snapshot(&mut f.conn());
+
+    let message = f
+        .error(
+            ACCEPT,
+            json!({
+                "id": item.id,
+                "input": { "name": "Mouse", "entityTypeId": ITEM_TYPE_ID },
+                "kinds": [{ "photoId": foreign.id, "kind": "PHOTO" }],
+            }),
+        )
+        .await;
+
+    assert_eq!(message, "photo kinds name a photo of another item");
+    assert_eq!(snapshot(&mut f.conn()), before);
+}
+
+#[tokio::test]
+async fn changing_a_submitted_batch_is_refused() {
+    let f = Fixture::new();
+    let (batch, photo) = {
+        let mut conn = f.conn();
+        let (batch, item) = fixtures::ingest_batch(&mut conn, None);
+        let photo = fixtures::ingest_photo(&mut conn, &item.id, &"cc".repeat(32), "image/jpeg");
+        ingest::submit(&mut conn, &batch.id).unwrap();
+        (batch, photo)
+    };
+    let submitted = "this batch has been submitted and can no longer change";
+
+    assert_eq!(
+        f.error(
+            "mutation($id: ID!) { addIngestItem(batchId: $id) { id } }",
+            json!({ "id": batch.id }),
+        )
+        .await,
+        submitted
+    );
+    assert_eq!(
+        f.error(
+            "mutation($id: ID!) { removeIngestPhoto(id: $id) }",
+            json!({ "id": photo.id }),
+        )
+        .await,
+        submitted
+    );
+    assert_eq!(
+        f.batch(&batch.id).await["items"][0]["photos"][0]["id"],
+        photo.id.as_str()
+    );
 }

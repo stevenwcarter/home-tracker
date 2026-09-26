@@ -1,6 +1,7 @@
 //! The GraphQL `Mutation` root. Every resolver passes the write gate first,
 //! so a read-only actor is refused before any input is parsed or validated.
 
+use diesel::SqliteConnection;
 use juniper::{FieldError, FieldResult, ID, Value};
 use tracing::info;
 
@@ -10,6 +11,7 @@ use super::inputs::{
 };
 use super::schema::graphql_translate_anyhow as gql;
 use crate::ai::client::AiError;
+use crate::ingest::events::{EventKind, IngestEvent};
 use crate::kinds::{AttachmentKind, IngestBatchStatus};
 use crate::models::{Entity, EntityType, IngestBatch, IngestItem, Tag};
 use crate::svc;
@@ -204,7 +206,8 @@ impl Mutation {
     /// Analyses ready or failed item `id` again in the background.
     fn retry_ingest_item(ctx: &GraphQLContext, id: ID) -> FieldResult<IngestItem> {
         ctx.require_write()?;
-        let item = refusable(ctx.conn().and_then(|mut c| svc::ingest::retry(&mut c, &id)))?;
+        let item = review_step(ctx, &id, |c| svc::ingest::retry(c, &id))?;
+        // Spawned after `review_step` published, so the runner's events follow.
         ctx.ingest.spawn_item(item.id.clone());
         Ok(item)
     }
@@ -220,27 +223,16 @@ impl Mutation {
         photo_kinds: Vec<IngestPhotoKindInput>,
     ) -> FieldResult<Entity> {
         ctx.require_write()?;
+        let input = gql(svc::entity::EntityInput::try_from(input))?;
         let kinds: Vec<(String, AttachmentKind)> =
             photo_kinds.into_iter().map(Into::into).collect();
-        let (entity, batch) =
-            refusable(svc::entity::EntityInput::try_from(input).and_then(|input| {
-                let mut c = ctx.conn()?;
-                let entity = svc::ingest::accept(&mut c, &id, input, &kinds)?;
-                Ok((entity, svc::ingest::batch_of(&mut c, &id)?))
-            }))?;
-        close_if_done(ctx, &batch);
-        Ok(entity)
+        review_step(ctx, &id, |c| svc::ingest::accept(c, &id, input, &kinds))
     }
 
     /// Sets ready or failed item `id` aside, creating nothing.
     fn skip_ingest_item(ctx: &GraphQLContext, id: ID) -> FieldResult<IngestItem> {
         ctx.require_write()?;
-        let (item, batch) = refusable(ctx.conn().and_then(|mut c| {
-            let item = svc::ingest::skip(&mut c, &ctx.data_dir, &id)?;
-            Ok((item, svc::ingest::batch_of(&mut c, &id)?))
-        }))?;
-        close_if_done(ctx, &batch);
-        Ok(item)
+        review_step(ctx, &id, |c| svc::ingest::skip(c, &ctx.data_dir, &id))
     }
 
     /// Deletes batch `id` with everything staged in it, and ends its
@@ -269,12 +261,29 @@ fn refusable<T>(result: anyhow::Result<T>) -> FieldResult<T> {
     })
 }
 
-/// Ends `batch`'s progress streams once it is done: nothing more happens to
-/// it, and a client that reconnects is told so by the stream itself.
-fn close_if_done(ctx: &GraphQLContext, batch: &IngestBatch) {
-    if batch.status == IngestBatchStatus::Done {
-        ctx.ingest.events().close(&batch.id);
+/// Runs `step` on item `item_id` (an accept, skip or retry) and tells the
+/// batch's progress streams what changed: the item, then the batch when its
+/// status moved. A batch that is now done has its streams ended after that;
+/// receivers read what was sent before they see the channel closed.
+fn review_step<T>(
+    ctx: &GraphQLContext,
+    item_id: &str,
+    step: impl FnOnce(&mut SqliteConnection) -> anyhow::Result<T>,
+) -> FieldResult<T> {
+    let (result, before, batch) = refusable(ctx.conn().and_then(|mut c| {
+        let before = svc::ingest::batch_of(&mut c, item_id)?.status;
+        let result = step(&mut c)?;
+        Ok((result, before, svc::ingest::batch_of(&mut c, item_id)?))
+    }))?;
+    let events = ctx.ingest.events();
+    events.publish(&batch.id, IngestEvent::new(EventKind::Item, item_id));
+    if batch.status != before {
+        events.publish(&batch.id, IngestEvent::new(EventKind::Batch, &batch.id));
     }
+    if batch.status == IngestBatchStatus::Done {
+        events.close(&batch.id);
+    }
+    Ok(result)
 }
 
 #[cfg(test)]

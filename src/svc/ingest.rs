@@ -546,24 +546,25 @@ pub fn settle_batch(conn: &mut SqliteConnection, batch_id: &str) -> Result<Inges
 }
 
 /// Deletes every batch with no activity since `cutoff`, whatever its status,
-/// and the originals of its photos that nothing else shares. Returns how
-/// many batches went.
+/// and the originals of its photos that nothing else shares. Returns the ids
+/// of the batches that went, so their progress streams can be ended.
 pub fn cleanup_stale(
     conn: &mut SqliteConnection,
     data_dir: &Path,
     cutoff: NaiveDateTime,
-) -> Result<usize> {
-    let (count, shas) = conn.transaction(|conn| {
+) -> Result<Vec<String>> {
+    let (stale, shas) = conn.transaction(|conn| {
         let stale: Vec<String> = ingest_batches::table
             .filter(ingest_batches::updated_at.lt(cutoff))
             .select(ingest_batches::id)
             .load(conn)
             .context("finding stale ingest batches")?;
         let ids: Vec<&str> = stale.iter().map(String::as_str).collect();
-        Ok::<_, anyhow::Error>((stale.len(), delete_batches(conn, &ids)?))
+        let shas = delete_batches(conn, &ids)?;
+        Ok::<_, anyhow::Error>((stale, shas))
     })?;
     remove_originals(conn, data_dir, &shas);
-    Ok(count)
+    Ok(stale)
 }
 
 /// After a restart: puts every item left `analysing` in a processing batch
@@ -1325,7 +1326,7 @@ mod tests {
 
         let removed = cleanup_stale(&mut conn, data.path(), now - TimeDelta::days(7)).unwrap();
 
-        assert_eq!(removed, 1);
+        assert_eq!(removed, [stale.id.as_str()]);
         assert!(get_batch(&mut conn, &stale.id).unwrap().is_none());
         assert!(get_item(&mut conn, &stale_item.id).unwrap().is_none());
         assert!(!files[0].exists());
@@ -1351,14 +1352,26 @@ mod tests {
 
         age(&mut conn);
         touch(&mut conn, &batch.id).unwrap();
-        assert_eq!(cleanup_stale(&mut conn, data.path(), cutoff).unwrap(), 0);
+        assert!(
+            cleanup_stale(&mut conn, data.path(), cutoff)
+                .unwrap()
+                .is_empty()
+        );
         age(&mut conn);
         ingest_photo(&mut conn, &item.id, &"cc".repeat(32), "image/jpeg");
-        assert_eq!(cleanup_stale(&mut conn, data.path(), cutoff).unwrap(), 0);
+        assert!(
+            cleanup_stale(&mut conn, data.path(), cutoff)
+                .unwrap()
+                .is_empty()
+        );
         submit(&mut conn, &batch.id).unwrap();
         age(&mut conn);
         set_item_status(&mut conn, &item.id, IngestItemStatus::Analysing, None).unwrap();
-        assert_eq!(cleanup_stale(&mut conn, data.path(), cutoff).unwrap(), 0);
+        assert!(
+            cleanup_stale(&mut conn, data.path(), cutoff)
+                .unwrap()
+                .is_empty()
+        );
 
         // Reviewing an item a day keeps a batch alive even when an accept or
         // skip leaves its status unchanged.
@@ -1377,7 +1390,11 @@ mod tests {
             batch_status(&mut conn, &batch.id),
             IngestBatchStatus::Reviewing
         );
-        assert_eq!(cleanup_stale(&mut conn, data.path(), cutoff).unwrap(), 0);
+        assert!(
+            cleanup_stale(&mut conn, data.path(), cutoff)
+                .unwrap()
+                .is_empty()
+        );
         let third = ready_item_in(&mut conn, &batch.id);
         age(&mut conn);
         skip(&mut conn, data.path(), &later).unwrap();
@@ -1385,7 +1402,11 @@ mod tests {
             batch_status(&mut conn, &batch.id),
             IngestBatchStatus::Reviewing
         );
-        assert_eq!(cleanup_stale(&mut conn, data.path(), cutoff).unwrap(), 0);
+        assert!(
+            cleanup_stale(&mut conn, data.path(), cutoff)
+                .unwrap()
+                .is_empty()
+        );
         assert!(get_item(&mut conn, &third).unwrap().is_some());
         assert_eq!(
             refusal(touch(&mut conn, "missing")),
