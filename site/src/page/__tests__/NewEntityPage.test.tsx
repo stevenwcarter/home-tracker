@@ -4,7 +4,14 @@ import userEvent from '@testing-library/user-event';
 import { CREATE_ENTITY } from 'hooks/queries';
 import { EntityInput } from 'types/entity';
 import { entityDetail } from 'test/entityFixtures';
-import { locationsMock, lookupMocks, tagsMock, typesMock } from 'test/formFixtures';
+import {
+  ENTITY_TYPES,
+  entityTypeWire,
+  locationsMock,
+  lookupMocks,
+  tagsMock,
+  typesMock,
+} from 'test/formFixtures';
 import { entityMock, spiedMock, summaryMock } from 'test/pageMocks';
 import { renderRoute } from 'test/renderRoute';
 
@@ -95,6 +102,24 @@ describe('NewEntityPage', () => {
       expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/items\/saw$/),
     );
     expect(await screen.findByRole('heading', { level: 1, name: 'Saw' })).toBeInTheDocument();
+  });
+
+  it('preselects the built-in Item type when the URL names no type', async () => {
+    const user = userEvent.setup();
+    const ITEM_TYPE_ID = '00000000-0000-7000-8000-000000000002';
+    renderRoute('/locations/garage/new', [
+      typesMock([...ENTITY_TYPES, entityTypeWire(ITEM_TYPE_ID, 'Item', false)]),
+      tagsMock(),
+      locationsMock(),
+    ]);
+    await screen.findByRole('option', { name: 'Item' });
+    await screen.findByRole('option', { name: /Office/ });
+    const type = screen.getByLabelText('Type');
+    expect(type).toHaveValue(ITEM_TYPE_ID);
+    expect(type).toHaveDisplayValue('Item');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled();
+    await user.type(screen.getByLabelText('Name'), 'Saw');
+    expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled();
   });
 
   it('stays on the form when the create fails', async () => {

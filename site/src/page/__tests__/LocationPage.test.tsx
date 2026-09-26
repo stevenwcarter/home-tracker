@@ -112,6 +112,12 @@ describe('LocationPage', () => {
     expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/locations\/house$/);
     expect(deleted.result).toHaveBeenCalledTimes(1);
     expect(toast.error).not.toHaveBeenCalled();
+
+    // The parent reuses the same page instance: its delete state must start fresh.
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+    const parentDialog = screen.getByRole('dialog', { name: 'Delete House?' });
+    expect(within(parentDialog).getByRole('button', { name: 'Delete location' })).toBeEnabled();
   });
 
   it('stays on the page when the delete is refused', async () => {

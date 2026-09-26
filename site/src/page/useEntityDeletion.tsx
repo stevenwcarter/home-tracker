@@ -26,6 +26,10 @@ export const useEntityDeletion = (entity: EntityDetail | null) => {
     const { id, parentId } = entity;
     setDeleting(true);
     if (await remove({ id, parentId })) {
+      // The parent's route can reuse this page instance (`/locations/:id` to
+      // `/locations/:parent`), so the dialog state must not carry over to it.
+      setConfirming(false);
+      setDeleting(false);
       // A parent that is an item redirects from `/locations/:id` to its item page.
       navigate(parentId ? `/locations/${parentId}` : '/', { replace: true });
       return;

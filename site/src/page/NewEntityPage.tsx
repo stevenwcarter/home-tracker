@@ -1,20 +1,31 @@
 import { useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { EntityForm } from 'components/EntityForm';
+import { PageSkeleton } from 'components/PageSkeleton';
 import { useCreateEntity } from 'hooks/useEntityMutations';
 import { useEntityTypes } from 'hooks/useEntityTypes';
-import { EntityInput } from 'types/entity';
+import { EntityInput, EntityTypeDetail } from 'types/entity';
 import { entityPath } from 'utils/entityPath';
+
+/** The seeded Item type's id. */
+const ITEM_TYPE_ID = '00000000-0000-7000-8000-000000000002';
+
+/** The type a new entity starts as when the URL names none: the built-in Item, else a non-location "Item". */
+const defaultItemType = (types: EntityTypeDetail[]) =>
+  types.find((type) => type.id === ITEM_TYPE_ID) ??
+  types.find((type) => !type.isLocation && type.name === 'Item');
 
 /**
  * `/new` (top level) and `/locations/:id/new` (inside that location). An
  * optional `?type=<entity type id>` preselects the type, which is how "Add
- * location" differs from "Add item". On save it opens the new entity's page.
+ * location" differs from "Add item"; without it the Item type is preselected.
+ * On save it opens the new entity's page.
  */
 export const NewEntityPage = () => {
   const { id: parentId } = useParams();
   const [searchParams] = useSearchParams();
-  const typeId = searchParams.get('type') ?? undefined;
-  const { entityTypes } = useEntityTypes();
+  const typeParam = searchParams.get('type');
+  const { entityTypes, loading: typesLoading } = useEntityTypes();
+  const typeId = typeParam ?? defaultItemType(entityTypes)?.id;
   const { create, loading } = useCreateEntity();
   const navigate = useNavigate();
 
@@ -25,6 +36,11 @@ export const NewEntityPage = () => {
     // On failure the hook has toasted; the form keeps what was typed.
     if (created) navigate(entityPath(created));
   };
+
+  // The form reads its default type once on mount, so wait for the types to pick Item.
+  if (typeParam === null && typesLoading && entityTypes.length === 0) {
+    return <PageSkeleton label="Loading form" />;
+  }
 
   return (
     <section>
