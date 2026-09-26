@@ -632,3 +632,87 @@ fn a_parent_cycle_is_broken_with_a_warning() {
         report.warnings
     );
 }
+
+#[test]
+fn a_failed_import_rolls_back_everything() {
+    let h = Harness::new();
+    let cable_id = h.ids.cable.clone();
+    h.edit_table("entities", |rows| {
+        Harness::row(rows, &cable_id)["entity_type_entities"] = "no-such-type".into();
+    });
+    let err = format!("{:#}", h.import().unwrap_err());
+    assert!(
+        err.contains(&h.ids.cable) && err.contains("no-such-type"),
+        "{err}"
+    );
+    // The two seeded built-in types are all that remain; the entity pass ran
+    // after types, templates and tags were written, so this proves a rollback.
+    // Originals written before the failure would be acceptable orphans (they
+    // are content-addressed and reused by the next run); the database is not.
+    let mut conn = h.conn();
+    assert_eq!(row_counts(&mut conn), [2, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let seeded: Vec<String> = entity_types::table
+        .order(entity_types::id)
+        .select(entity_types::id)
+        .load(&mut conn)
+        .unwrap();
+    assert_eq!(seeded, [LOCATION_TYPE_ID, ITEM_TYPE_ID]);
+}
+
+#[test]
+fn an_unknown_attachment_kind_is_skipped_with_a_warning() {
+    let h = Harness::new();
+    let manual_id = h.ids.manual.clone();
+    h.edit_table("attachments", |rows| {
+        Harness::row(rows, &manual_id)["type"] = "hologram".into();
+    });
+    let report = h.import().unwrap();
+    assert!(
+        svc::attachment::get(&mut h.conn(), &h.ids.manual)
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        counts(&report, "attachments"),
+        TableCounts {
+            inserted: 1,
+            updated: 0,
+            skipped: 1
+        }
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains(&h.ids.manual) && w.contains("hologram")),
+        "{:?}",
+        report.warnings
+    );
+}
+
+#[test]
+fn an_unknown_field_kind_is_skipped_with_a_warning() {
+    let h = Harness::new();
+    let field_id = "field-router-model";
+    h.edit_table("entity_fields", |rows| {
+        Harness::row(rows, field_id)["type"] = "json".into();
+    });
+    let report = h.import().unwrap();
+    let fields = svc::entity_field::for_entity(&mut h.conn(), &h.ids.router).unwrap();
+    assert!(fields.is_empty(), "{fields:?}");
+    assert_eq!(
+        counts(&report, "entity_fields"),
+        TableCounts {
+            skipped: 1,
+            ..TableCounts::default()
+        }
+    );
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains(field_id) && w.contains("json")),
+        "{:?}",
+        report.warnings
+    );
+}

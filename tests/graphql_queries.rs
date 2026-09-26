@@ -1,8 +1,10 @@
 use axum_test::TestServer;
 use chrono::DateTime;
-use home_tracker::db::TestDb;
+use diesel::prelude::*;
+use home_tracker::db::{ITEM_TYPE_ID, TestDb};
 use home_tracker::routes::app;
-use home_tracker::svc::fixtures::{SampleIds, seed_sample};
+use home_tracker::schema::entities;
+use home_tracker::svc::fixtures::{self, SampleIds, seed_sample};
 use serde_json::{Value, json};
 
 async fn seeded() -> (TestServer, SampleIds, TestDb) {
@@ -213,6 +215,33 @@ async fn search_finds_by_substring_with_limit() {
 
     let drill = query(&server, r#"{ search(query: "drill") { name } }"#, json!({})).await;
     assert_eq!(names(&drill["search"]), ["Drill"]);
+}
+
+#[tokio::test]
+async fn search_limit_is_clamped() {
+    let db = TestDb::new();
+    {
+        let mut conn = db.pool.get().unwrap();
+        for n in 0..250 {
+            let id = format!("bulk-{n}");
+            diesel::insert_into(entities::table)
+                .values(fixtures::entity(&id, &id, ITEM_TYPE_ID, None, n))
+                .execute(&mut conn)
+                .unwrap();
+        }
+    }
+    let server = TestServer::new(app(db.pool.clone()));
+
+    let hits = |limit: i32| {
+        let server = &server;
+        async move {
+            let q = format!(r#"{{ search(query: "bulk", limit: {limit}) {{ id }} }}"#);
+            let data = query(server, &q, json!({})).await;
+            data["search"].as_array().unwrap().len()
+        }
+    };
+    assert_eq!(hits(1000).await, 200);
+    assert_eq!(hits(0).await, 1);
 }
 
 #[tokio::test]
