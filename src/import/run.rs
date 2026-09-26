@@ -3,12 +3,14 @@
 //! Every table is upserted by primary key, so re-running an import refreshes
 //! rows in place and never deletes anything. Links (parents, tags, templates)
 //! are written in a second pass once both ends exist; a link whose target is not
-//! in the backup is dropped with a warning rather than failing the import.
+//! in the backup, or an entity parent link that would form a cycle, is dropped
+//! with a warning rather than failing the import. An attachment whose bytes
+//! changed since the last import loses its stored thumbnails.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
-use std::fs;
 use std::path::Path;
+use std::{fs, iter};
 
 use anyhow::{Context, Result, bail};
 use chrono::{NaiveDate, NaiveDateTime};
@@ -469,24 +471,42 @@ fn import_entities(
         );
     }
     let entity_ids: HashSet<String> = rows.iter().map(|e| e.id.clone()).collect();
+    // Links accepted so far, child → parent, so one that would close a loop
+    // (which would make every ancestor walk spin forever) can be refused.
+    let mut parents: HashMap<&str, &str> = HashMap::new();
     for row in rows {
         // `entity_children` holds the PARENT id despite its name.
-        let Some(parent) = &row.entity_children else {
+        let Some(parent) = row.entity_children.as_deref() else {
             continue;
         };
-        if !entity_ids.contains(parent) {
-            report.warn(format!(
-                "entity {} references missing parent {parent}; imported as a root",
-                row.id
-            ));
+        let id = row.id.as_str();
+        let refusal = if !entity_ids.contains(parent) {
+            Some(format!("references missing parent {parent}"))
+        } else if parent == id {
+            Some("is its own parent".to_owned())
+        } else if reaches(&parents, parent, id) {
+            Some(format!("would close a parent cycle through {parent}"))
+        } else {
+            None
+        };
+        if let Some(reason) = refusal {
+            report.warn(format!("entity {id} {reason}; imported as a root"));
             continue;
         }
-        diesel::update(entities::table.find(&row.id))
+        parents.insert(id, parent);
+        diesel::update(entities::table.find(id))
             .set(entities::parent_id.eq(parent))
             .execute(conn)
-            .with_context(|| format!("setting the parent of entity {}", row.id))?;
+            .with_context(|| format!("setting the parent of entity {id}"))?;
     }
     Ok(entity_ids)
+}
+
+/// Whether walking up `parents` from `start` (inclusive) reaches `target`. The
+/// map only ever gains links that pass this check, so it stays acyclic and the
+/// walk always ends.
+fn reaches(parents: &HashMap<&str, &str>, start: &str, target: &str) -> bool {
+    iter::successors(Some(start), |id| parents.get(id).copied()).any(|id| id == target)
 }
 
 fn patch_template_locations(
@@ -640,6 +660,7 @@ fn import_attachments(
         if store_original(originals_dir, &sha256, &bytes)? {
             report.originals_written += 1;
         }
+        invalidate_stale_thumbnails(conn, &row.id, &sha256)?;
         let (created_at, updated_at) = stamps(&row.created_at, &row.updated_at, &what)?;
         upsert!(
             conn,
@@ -670,6 +691,28 @@ fn import_attachments(
                 report,
             )?;
         }
+    }
+    Ok(())
+}
+
+/// Deletes every stored thumbnail of `attachment_id` when the attachment already
+/// exists with bytes other than `sha256`: thumbnails are keyed by attachment and
+/// size, not by content, so they would otherwise keep showing the old picture.
+fn invalidate_stale_thumbnails(
+    conn: &mut SqliteConnection,
+    attachment_id: &str,
+    sha256: &str,
+) -> Result<()> {
+    let previous: Option<String> = attachments::table
+        .find(attachment_id)
+        .select(attachments::sha256)
+        .first(conn)
+        .optional()
+        .with_context(|| format!("reading the digest of attachment {attachment_id}"))?;
+    if previous.is_some_and(|old| old != sha256) {
+        diesel::delete(thumbnails::table.filter(thumbnails::attachment_id.eq(attachment_id)))
+            .execute(conn)
+            .with_context(|| format!("deleting stale thumbnails of attachment {attachment_id}"))?;
     }
     Ok(())
 }

@@ -12,7 +12,9 @@ use home_tracker::import::report::{ImportReport, TableCounts};
 use home_tracker::import::run::import_backup;
 use home_tracker::import::source::{self, DirSource, Source};
 use home_tracker::kinds::{AttachmentKind, FieldKind};
-use home_tracker::models::{Attachment, Entity, EntityTemplate, EntityType, TemplateField};
+use home_tracker::models::{
+    Attachment, Entity, EntityTemplate, EntityType, TemplateField, Thumbnail,
+};
 use home_tracker::money::Cents;
 use home_tracker::schema::{
     attachments, entities, entity_fields, entity_templates, entity_types, tag_entities, tags,
@@ -20,7 +22,8 @@ use home_tracker::schema::{
 };
 use home_tracker::svc;
 use serde_json::Value;
-use support::{MiniBackup, MiniIds};
+use sha2::{Digest, Sha256};
+use support::{MiniBackup, MiniIds, recoloured_photo};
 use tempfile::TempDir;
 
 /// A fresh database, a data dir, and the mini backup exploded into a directory.
@@ -63,6 +66,11 @@ impl Harness {
         let mut value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
         edit(&mut value);
         fs::write(path, serde_json::to_vec(&value).unwrap()).unwrap();
+    }
+
+    /// Overwrites the blob stored under `attachments/<id>` in the backup directory.
+    fn write_blob(&self, id: &str, bytes: &[u8]) {
+        fs::write(self.backup.path().join("attachments").join(id), bytes).unwrap();
     }
 
     /// The row of `rows` (a JSON array) whose `id` is `id`.
@@ -501,4 +509,126 @@ fn zip_with_a_single_top_level_folder_is_accepted() {
     let plain_ids = import_zip(&plain);
     assert_eq!(plain_ids.len(), 4);
     assert_eq!(import_zip(&nested), plain_ids);
+}
+
+/// Imports the mini backup, adds a 300px thumbnail next to Homebox's 500px one,
+/// then swaps the photo's JPEG for a differently coloured one (and its
+/// thumbnail blob for `new_thumb`, or deletes it when `None`) and re-imports.
+/// Returns the harness and the new JPEG's SHA-256.
+fn reimport_with_a_recoloured_photo(new_thumb: Option<&[u8]>) -> (Harness, String) {
+    let h = Harness::new();
+    h.import().unwrap();
+    let old = svc::attachment::thumbnail(&mut h.conn(), &h.ids.photo, 500)
+        .unwrap()
+        .unwrap();
+    diesel::insert_into(thumbnails::table)
+        .values(Thumbnail { size: 300, ..old })
+        .execute(&mut h.conn())
+        .unwrap();
+
+    let (jpeg, _) = recoloured_photo([200, 30, 30]);
+    h.write_blob(&h.ids.photo, &jpeg);
+    match new_thumb {
+        Some(bytes) => h.write_blob(&h.ids.thumb, bytes),
+        None => fs::remove_file(h.backup.path().join("attachments").join(&h.ids.thumb)).unwrap(),
+    }
+    h.import().unwrap();
+    (h, hex::encode(Sha256::digest(&jpeg)))
+}
+
+#[test]
+fn changed_bytes_invalidate_thumbnails() {
+    let (h, new_sha256) = reimport_with_a_recoloured_photo(None);
+    assert_ne!(new_sha256, h.ids.jpeg_sha256);
+    let mut conn = h.conn();
+    let photo = svc::attachment::get(&mut conn, &h.ids.photo)
+        .unwrap()
+        .unwrap();
+    assert_eq!(photo.sha256, new_sha256);
+    for size in [300, 500] {
+        assert!(
+            svc::attachment::thumbnail(&mut conn, &h.ids.photo, size)
+                .unwrap()
+                .is_none(),
+            "the stale {size}px thumbnail survived"
+        );
+    }
+}
+
+#[test]
+fn changed_bytes_store_the_new_thumbnail() {
+    let (_, webp) = recoloured_photo([200, 30, 30]);
+    let (h, new_sha256) = reimport_with_a_recoloured_photo(Some(&webp));
+    let mut conn = h.conn();
+    let photo = svc::attachment::get(&mut conn, &h.ids.photo)
+        .unwrap()
+        .unwrap();
+    assert_eq!(photo.sha256, new_sha256);
+    assert!(
+        svc::attachment::thumbnail(&mut conn, &h.ids.photo, 300)
+            .unwrap()
+            .is_none()
+    );
+    let thumb = svc::attachment::thumbnail(&mut conn, &h.ids.photo, 500)
+        .unwrap()
+        .unwrap();
+    assert_eq!(thumb.data, webp);
+}
+
+#[test]
+fn unchanged_bytes_keep_other_thumbnail_sizes() {
+    let h = Harness::new();
+    h.import().unwrap();
+    let old = svc::attachment::thumbnail(&mut h.conn(), &h.ids.photo, 500)
+        .unwrap()
+        .unwrap();
+    diesel::insert_into(thumbnails::table)
+        .values(Thumbnail { size: 300, ..old })
+        .execute(&mut h.conn())
+        .unwrap();
+    h.import().unwrap();
+    assert!(
+        svc::attachment::thumbnail(&mut h.conn(), &h.ids.photo, 300)
+            .unwrap()
+            .is_some()
+    );
+}
+
+#[test]
+fn a_self_parented_entity_becomes_a_root_with_a_warning() {
+    let h = Harness::new();
+    let cable_id = h.ids.cable.clone();
+    h.edit_table("entities", |rows| {
+        Harness::row(rows, &cable_id)["entity_children"] = cable_id.as_str().into();
+    });
+    let report = h.import().unwrap();
+    assert_eq!(h.entity(&h.ids.cable).parent_id, None);
+    let expected = format!(
+        "entity {} is its own parent; imported as a root",
+        h.ids.cable
+    );
+    assert!(report.warnings.contains(&expected), "{:?}", report.warnings);
+}
+
+#[test]
+fn a_parent_cycle_is_broken_with_a_warning() {
+    let h = Harness::new();
+    // Garage → Tote 1 → Garage: Tote 1 already sits under Garage.
+    let (garage_id, tote_id) = (h.ids.garage.clone(), h.ids.tote1.clone());
+    h.edit_table("entities", |rows| {
+        Harness::row(rows, &garage_id)["entity_children"] = tote_id.as_str().into();
+    });
+    let report = h.import().unwrap();
+    // Rows link in backup order, so Garage (listed first) takes Tote 1 as its
+    // parent and Tote 1's link back to Garage is the one that closes the loop.
+    assert_eq!(h.entity(&h.ids.garage).parent_id, Some(h.ids.tote1.clone()));
+    assert_eq!(h.entity(&h.ids.tote1).parent_id, None);
+    assert!(
+        report
+            .warnings
+            .iter()
+            .any(|w| w.contains(&h.ids.tote1) && w.contains("cycle")),
+        "{:?}",
+        report.warnings
+    );
 }

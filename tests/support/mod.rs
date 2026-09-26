@@ -75,6 +75,13 @@ fn picture() -> RgbImage {
     RgbImage::from_fn(4, 3, |x, y| Rgb([(x * 60) as u8, (y * 80) as u8, 128]))
 }
 
+/// A solid 4×3 image of `colour`, encoded as the JPEG and WebP blobs of the
+/// photo and its thumbnail, for tests that change a blob between imports.
+pub fn recoloured_photo(colour: [u8; 3]) -> (Vec<u8>, Vec<u8>) {
+    let img = RgbImage::from_pixel(4, 3, Rgb(colour));
+    (jpeg_bytes(&img), webp_bytes(&img))
+}
+
 fn jpeg_bytes(img: &RgbImage) -> Vec<u8> {
     let mut out = Cursor::new(Vec::new());
     JpegEncoder::new(&mut out)
