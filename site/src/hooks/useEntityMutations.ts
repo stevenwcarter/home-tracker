@@ -30,7 +30,9 @@ export const useCreateEntity = () => {
 /**
  * `update(previous, input)` replaces every field of `previous.id` with
  * `input` (build it with `toEntityInput`) and resolves to the updated entity,
- * or null after toasting a failure. On a move, both parents are evicted.
+ * or null after toasting a failure. The parent is always evicted (a retype
+ * moves the entity between its Locations and Items sections); on a move, the
+ * old parent is evicted too.
  */
 export const useUpdateEntity = () => {
   const [mutate, { loading }] = useRefetchingMutation<
@@ -39,15 +41,12 @@ export const useUpdateEntity = () => {
   >(UPDATE_ENTITY, { refetch: REFETCH });
   const update = useCallback(
     (previous: Placed, input: EntityInput) => {
-      const moved = previous.parentId !== input.parentId;
+      const parents =
+        previous.parentId === input.parentId
+          ? [input.parentId]
+          : [previous.parentId, input.parentId];
       return toastOnFailure(
-        async () =>
-          (
-            await mutate(
-              { id: previous.id, input },
-              moved ? [previous.parentId, input.parentId] : [],
-            )
-          ).updateEntity,
+        async () => (await mutate({ id: previous.id, input }, parents)).updateEntity,
         'save',
         null,
       );

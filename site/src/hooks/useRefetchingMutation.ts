@@ -14,6 +14,19 @@ export const REFETCH_AFTER_WRITE = [
   'GetTags',
 ] as const;
 
+/**
+ * The `ROOT_QUERY` field each list query caches its answer under. A write
+ * evicts these for the queries it names that are not mounted, so the next
+ * mount goes to the network instead of answering from a stale cache.
+ */
+const ROOT_FIELDS: Readonly<Record<string, string>> = {
+  GetSummary: 'summary',
+  GetRootItems: 'rootItems',
+  GetLocations: 'locations',
+  GetEntityTypes: 'entityTypes',
+  GetTags: 'tags',
+};
+
 type EntityIds = ReadonlyArray<string | null | undefined>;
 
 export interface RefetchingMutationOptions<TData, TVariables> {
@@ -23,23 +36,31 @@ export interface RefetchingMutationOptions<TData, TVariables> {
   evict?: (data: TData, variables: TVariables) => EntityIds;
 }
 
-/** Drops each `Entity:<id>` entry, then garbage-collects what only they referenced. */
-function evictEntities(cache: ApolloCache, ids: EntityIds): void {
-  let evicted = false;
+/**
+ * Drops each `Entity:<id>` entry, the root field of every named query that is
+ * not active, and every cached `search` answer (whatever its arguments), then
+ * garbage-collects what only they referenced.
+ */
+function evictStale(cache: ApolloCache, ids: EntityIds, inactive: readonly string[]): void {
   for (const id of ids) {
     if (!id) continue;
     cache.evict({ id: cache.identify({ __typename: 'Entity', id }) });
-    evicted = true;
   }
-  if (evicted) cache.gc();
+  for (const name of inactive) {
+    const fieldName = ROOT_FIELDS[name];
+    if (fieldName) cache.evict({ id: 'ROOT_QUERY', fieldName });
+  }
+  cache.evict({ id: 'ROOT_QUERY', fieldName: 'search' });
+  cache.gc();
 }
 
 /**
  * `useMutation` plus this app's refetch policy. On success it evicts the
  * `Entity` entries named by `evict` (and by the call's `alsoEvict`, for ids
- * only the caller knows, such as a moved entity's old parent), then refetches
- * the named queries that are currently active, and resolves only once those
- * refetches land (`awaitRefetchQueries`).
+ * only the caller knows, such as a moved entity's old parent), evicts the
+ * root field of each named query that is not active (and every cached
+ * search), then refetches the named queries that are active, and resolves
+ * only once those refetches land (`awaitRefetchQueries`).
  *
  * Eviction runs in the mutation's cache update, before the refetches, so a
  * refetched list (the sidebar's `GetLocations`) rewrites any entry it shares
@@ -57,16 +78,20 @@ export function useRefetchingMutation<TData, TVariables extends OperationVariabl
   const client = useApolloClient();
   // Read at completion through a ref, so an inline `evict` doesn't give `run` a new identity per render.
   const evictRef = useRef(evict);
+  const refetchRef = useRef(refetch);
   useEffect(() => {
     evictRef.current = evict;
-  }, [evict]);
+    refetchRef.current = refetch;
+  }, [evict, refetch]);
+  // Resolved at completion, not render: naming an inactive query makes Apollo warn.
+  const activeNames = useCallback(
+    () => new Set([...client.getObservableQueries('active')].map((query) => query.queryName)),
+    [client],
+  );
   const [mutate, { loading, error }] = useMutation<TData, TVariables>(mutation, {
     awaitRefetchQueries: true,
-    // Resolved at completion, not render: naming an inactive query makes Apollo warn.
     refetchQueries: () => {
-      const active = new Set(
-        [...client.getObservableQueries('active')].map((query) => query.queryName),
-      );
+      const active = activeNames();
       return refetch.filter((name) => active.has(name));
     },
   });
@@ -84,13 +109,18 @@ export function useRefetchingMutation<TData, TVariables extends OperationVariabl
         update: (cache, result) => {
           if (!result.data) return;
           const written = result.data as TData;
-          evictEntities(cache, [...(evictRef.current?.(written, variables) ?? []), ...alsoEvict]);
+          const active = activeNames();
+          evictStale(
+            cache,
+            [...(evictRef.current?.(written, variables) ?? []), ...alsoEvict],
+            refetchRef.current.filter((name) => !active.has(name)),
+          );
         },
       });
       if (data === undefined || data === null) throw new Error('The server returned no data');
       return data as TData;
     },
-    [mutate],
+    [mutate, activeNames],
   );
 
   return [run, { loading, error }] as const;

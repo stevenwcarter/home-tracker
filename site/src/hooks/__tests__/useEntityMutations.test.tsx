@@ -124,9 +124,10 @@ describe('useDeleteEntity', () => {
 
 /**
  * Renders `useHook` over an explicit cache seeded with House, Garage, Shelf
- * and Drill, all reachable from `ROOT_QUERY.locations` so `cache.gc()` keeps
- * them unless they are evicted. No query is active, so nothing refetches and
- * the cache shows exactly what the mutation evicted.
+ * and Drill, each retained so `cache.gc()` keeps them unless they are evicted
+ * (the write evicts the inactive `locations` root field that seeded them). No
+ * query is active, so nothing refetches and the cache shows exactly what the
+ * mutation evicted.
  */
 const renderOverSeededCache = <T,>(useHook: () => T, mocks: MockedResponse[]) => {
   const cache = new InMemoryCache();
@@ -141,6 +142,9 @@ const renderOverSeededCache = <T,>(useHook: () => T, mocks: MockedResponse[]) =>
       ],
     },
   });
+  for (const id of ['house', 'garage', 'shelf', 'drill']) {
+    cache.retain(`Entity:${id}`);
+  }
   const rendered = renderHook(useHook, {
     wrapper: ({ children }: { children: React.ReactNode }) => (
       <MockedProvider mocks={mocks} cache={cache}>
@@ -170,22 +174,21 @@ describe('entity mutation cache eviction', () => {
     expect(cached()).toContain('Entity:shelf');
   });
 
-  it('update without a move evicts neither parent', async () => {
-    const renamed = { ...input, name: 'Hammer drill' };
+  it('update without a move evicts the parent, so a retype re-sorts its sections', async () => {
+    const retyped = { ...input, entityTypeId: 'type-loc' };
     const { result, cached } = renderOverSeededCache(useUpdateEntity, [
       {
-        request: { query: UPDATE_ENTITY, variables: { id: 'drill', input: renamed } },
-        result: { data: { updateEntity: { ...drill, name: 'Hammer drill' } } },
+        request: { query: UPDATE_ENTITY, variables: { id: 'drill', input: retyped } },
+        result: { data: { updateEntity: { ...drill, isLocation: true } } },
       },
     ]);
     let updated: unknown;
     await act(async () => {
-      updated = await result.current.update(drill, renamed);
+      updated = await result.current.update(drill, retyped);
     });
-    expect(updated).toEqual({ ...drill, name: 'Hammer drill' });
-    expect(cached()).toEqual(
-      expect.arrayContaining(['Entity:garage', 'Entity:house', 'Entity:shelf']),
-    );
+    expect(updated).toEqual({ ...drill, isLocation: true });
+    expect(cached()).not.toContain('Entity:garage');
+    expect(cached()).toEqual(expect.arrayContaining(['Entity:house', 'Entity:shelf']));
   });
 
   it("create evicts the new entity's parent", async () => {

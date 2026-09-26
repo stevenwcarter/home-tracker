@@ -6,7 +6,14 @@ import type { MockedResponse } from '@apollo/client/testing';
 import React from 'react';
 import { InMemoryCache } from '@apollo/client';
 import { useRefetchingMutation } from '../useRefetchingMutation';
-import { DELETE_ENTITY, GET_ENTITY, GET_LOCATIONS } from '../queries';
+import {
+  DELETE_ENTITY,
+  GET_ENTITY,
+  GET_LOCATIONS,
+  GET_ROOT_ITEMS,
+  GET_TAGS,
+  SEARCH,
+} from '../queries';
 import { entityDetail, listItem, locationSummary, SUMMARY } from 'test/entityFixtures';
 import { REFETCHED_SUMMARY, renderWithSummary, summaryMocks } from 'test/mutationHarness';
 import { EntityDetail, LocationSummary } from 'types/entity';
@@ -193,5 +200,36 @@ describe('useRefetchingMutation', () => {
     expect(cached).not.toContain('Entity:drill');
     expect(cached).not.toContain('Entity:garage');
     expect(cached).toEqual(expect.arrayContaining(['Entity:house', 'Entity:shelf']));
+  });
+
+  it('evicts the root field of each named inactive query and every search, and nothing else', async () => {
+    const cache = new InMemoryCache();
+    cache.writeQuery({ query: GET_TAGS, data: { tags: [] } });
+    cache.writeQuery({ query: GET_ROOT_ITEMS, data: { rootItems: [] } });
+    cache.writeQuery({ query: SEARCH, variables: { query: 'drill' }, data: { search: [] } });
+    cache.writeQuery({ query: SEARCH, variables: { query: 'saw' }, data: { search: [] } });
+    const rootFields = () => Object.keys(cache.extract().ROOT_QUERY ?? {});
+    expect(rootFields()).toEqual([
+      '__typename',
+      'tags',
+      'rootItems',
+      'search({"limit":50,"query":"drill"})',
+      'search({"limit":50,"query":"saw"})',
+    ]);
+    const { result } = renderHook(
+      () => useRefetchingMutation(DELETE_ENTITY, { refetch: ['GetTags', 'GetEntity'] }),
+      {
+        wrapper: ({ children }: { children: React.ReactNode }) => (
+          <MockedProvider mocks={[deleteMock('drill')]} cache={cache}>
+            {children}
+          </MockedProvider>
+        ),
+      },
+    );
+    await act(async () => {
+      await result.current[0]({ id: 'drill' });
+    });
+    // `tags` was named and inactive; `rootItems` was not named, so it stays.
+    expect(rootFields().filter((field) => field !== '__typename')).toEqual(['rootItems']);
   });
 });

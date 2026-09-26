@@ -277,6 +277,8 @@ describe('ItemPage delete', () => {
       // The evicted item page refetches itself before it is left.
       entityMock('drill', null),
       garageRefetch.mock,
+      // The write evicted the unmounted types list, so the location page reloads it.
+      typesMock(),
     ]);
 
     const items = await screen.findByRole('region', { name: 'Items' });
