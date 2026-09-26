@@ -9,6 +9,7 @@ use diesel::serialize::{self, IsNull, Output, ToSql};
 use diesel::sql_types::Text;
 use diesel::sqlite::{Sqlite, SqliteValue};
 use juniper::GraphQLEnum;
+use serde::Serialize;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("unknown {kind} {value:?}")]
@@ -19,8 +20,12 @@ pub struct UnknownKind {
 
 macro_rules! text_enum {
     ($name:ident, $label:literal, { $($variant:ident => $text:literal),+ $(,)? }) => {
-        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, AsExpression, FromSqlRow, GraphQLEnum)]
+        #[derive(
+            Debug, Clone, Copy, PartialEq, Eq, Hash, AsExpression, FromSqlRow, GraphQLEnum, Serialize,
+        )]
         #[diesel(sql_type = Text)]
+        // JSON spells a variant as GraphQL does, so one client type fits both.
+        #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
         pub enum $name {
             $($variant),+
         }
@@ -85,6 +90,9 @@ text_enum!(FieldKind, "field kind", {
 
 #[cfg(test)]
 mod tests {
+    use juniper::ToInputValue;
+    use serde_json::Value;
+
     use super::*;
 
     #[test]
@@ -106,6 +114,23 @@ mod tests {
         assert_eq!(" Time ".parse::<FieldKind>().unwrap(), FieldKind::Time);
         assert!("thumbnail".parse::<AttachmentKind>().is_err());
         assert!("json".parse::<FieldKind>().is_err());
+    }
+
+    #[test]
+    fn json_spells_every_variant_as_graphql_does() {
+        fn spellings(value: impl Serialize + ToInputValue) -> (Value, Value) {
+            let json = serde_json::to_value(&value).unwrap();
+            let graphql = serde_json::to_value(value.to_input_value()).unwrap();
+            (json, graphql)
+        }
+        for kind in AttachmentKind::ALL {
+            let (json, graphql) = spellings(*kind);
+            assert_eq!(json, graphql);
+        }
+        for kind in FieldKind::ALL {
+            let (json, graphql) = spellings(*kind);
+            assert_eq!(json, graphql);
+        }
     }
 
     #[test]

@@ -1,22 +1,26 @@
-//! Top-level router: GraphQL, attachments, static assets, SPA fallback, compression
-//! (everything but attachments).
+//! Top-level router: GraphQL, attachments, uploads, static assets, SPA
+//! fallback, compression (everything but attachments and uploads), and the
+//! actor seam around all of it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use axum::Router;
 use axum::extract::Request;
 use axum::http::{StatusCode, Uri, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
+use axum::{Extension, Router};
 use rust_embed::RustEmbed;
 use tower_http::compression::CompressionLayer;
 
 use crate::api::IMMUTABLE_CACHE;
+use crate::api::actor::attach_actor;
 use crate::api::attachments::attachment_routes;
 use crate::api::graphql::graphql_routes;
+use crate::api::upload::upload_routes;
 use crate::db::SqlitePool;
+use crate::graphql::context::Actor;
 use crate::graphql::schema::create_schema;
 use crate::svc::thumbnail_service::ThumbnailService;
 
@@ -65,6 +69,19 @@ pub fn app(pool: SqlitePool, data_dir: PathBuf) -> Router {
 
 /// [`app`] around a caller-supplied thumbnail service, so tests can observe it.
 pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
+    // Outermost, so every route (and the fallback) sees the actor.
+    routes(pool, thumbnails).layer(middleware::from_fn(attach_actor))
+}
+
+/// [`app`] with every request made by `actor` instead of the one
+/// [`attach_actor`] would attach, for tests of what a read-only user may do.
+pub fn app_with_actor(pool: SqlitePool, data_dir: PathBuf, actor: Actor) -> Router {
+    let thumbnails = ThumbnailService::new(pool.clone(), data_dir);
+    routes(pool, thumbnails).layer(Extension(actor))
+}
+
+/// Every route, without the actor layer.
+fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
     let schema = Arc::new(create_schema());
     // The thumbnail service's data dir is the one the attachment routes read,
     // so a GraphQL delete removes originals from the same place.
@@ -82,8 +99,10 @@ pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) 
         .layer(CompressionLayer::new());
     // Merged outside the compression layer: originals are served byte-for-byte
     // under their sha256 ETag, and photos gain nothing from re-encoding.
-    // Pinned by tests/attachments.rs.
+    // Pinned by tests/attachments.rs. Uploads answer small JSON bodies.
+    let upload_dir = Arc::new(thumbnails.data_dir().to_path_buf());
     Router::new()
+        .merge(upload_routes(pool.clone(), upload_dir))
         .merge(attachment_routes(pool, thumbnails))
         .merge(compressed)
 }

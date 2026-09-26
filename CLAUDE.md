@@ -58,7 +58,7 @@ Single Rust crate at the repo root with an embedded, Vite-built React frontend. 
 - `svc/`: business logic, one file per aggregate (`entity.rs`, `entity_type.rs`, `entity_field.rs`, `tag.rs`, `attachment.rs`, `settings.rs`, `stats.rs`, `thumbnail.rs` sizes/MIME gate, `thumbnail_service.rs` generate-or-cache); `fixtures.rs` is test support (the shared sample inventory)
 - `graphql/`: juniper: `context.rs` (`GraphQLContext`, `Actor`, `Role`), `schema.rs` (`RootNode`), `query.rs`, `objects/` (one file per GraphQL type)
 - `import/`: Homebox backup importer: `source.rs` (zip or directory), `tables.rs` (row structs), `run.rs` (upsert), `report.rs`
-- `api/`: axum handlers: `graphql.rs` (`/graphql` is POST only; there is no auth in v1, so a GET-triggered mutation would be a LAN CSRF path; `/graphiql` in debug builds), `attachments.rs` (`/attachments/{id}` and its `/thumb/{size}`)
+- `api/`: axum handlers: `graphql.rs` (`/graphql` is POST only; there is no auth in v1, so a GET-triggered mutation would be a LAN CSRF path; `/graphiql` in debug builds), `attachments.rs` (`/attachments/{id}` and its `/thumb/{size}`), `upload.rs` (`POST /api/upload/{entityId}` multipart, 25 MiB limit on that route only, JSON errors), `actor.rs` (middleware attaching the request's `Actor`; handlers read `Extension<Actor>`)
 - `routes.rs`: router, compression, embedded SPA, `/assets` immutable cache
 - `healthcheck.rs`: liveness probe used by the Docker `HEALTHCHECK`
 

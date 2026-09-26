@@ -13,7 +13,7 @@ use tracing::warn;
 use crate::kinds::AttachmentKind;
 use crate::models::{Attachment, Entity, Thumbnail};
 use crate::schema::{attachments, thumbnails};
-use crate::svc::entity;
+use crate::svc::{entity, thumbnail};
 
 /// The attachments on `entity_id`: the primary one first, then oldest first.
 pub fn for_entity(conn: &mut SqliteConnection, entity_id: &str) -> Result<Vec<Attachment>> {
@@ -62,9 +62,53 @@ pub fn get(conn: &mut SqliteConnection, id: &str) -> Result<Option<Attachment>> 
         .with_context(|| format!("loading attachment {id:?}"))
 }
 
+/// The directory under `data_dir` holding originals by content address.
+pub fn originals_dir(data_dir: &Path) -> PathBuf {
+    data_dir.join("originals")
+}
+
 /// Where the bytes of the original with `sha256` live under `data_dir`.
 pub fn original_path(data_dir: &Path, sha256: &str) -> PathBuf {
-    data_dir.join("originals").join(sha256)
+    originals_dir(data_dir).join(sha256)
+}
+
+/// The thumbnail size a URL names when the caller does not pick one.
+pub const DEFAULT_THUMB_URL_SIZE: i32 = 500;
+
+/// Where `att`'s original is served. The `?v=` tag changes whenever the bytes
+/// do, so clients can cache the URL forever instead of the id.
+pub fn original_url(att: &Attachment) -> String {
+    format!("/attachments/{}?v={}", att.id, version_tag(&att.sha256))
+}
+
+/// Where a thumbnail of at most `size` pixels of `att` is served; `None` for
+/// non-images. The size is echoed as given: the HTTP handler rounds it to an
+/// allowed size.
+pub fn thumbnail_url(att: &Attachment, size: i32) -> Option<String> {
+    thumbnail::is_thumbnailable(&att.mime_type).then(|| {
+        format!(
+            "/attachments/{}/thumb/{size}?v={}",
+            att.id,
+            version_tag(&att.sha256)
+        )
+    })
+}
+
+/// `att`'s original URL and its thumbnail URL at [`DEFAULT_THUMB_URL_SIZE`]:
+/// what the GraphQL `Attachment` reports by default, and what the upload
+/// response carries, so the two cannot drift apart.
+pub fn attachment_urls(att: &Attachment) -> (String, Option<String>) {
+    (
+        original_url(att),
+        thumbnail_url(att, DEFAULT_THUMB_URL_SIZE),
+    )
+}
+
+/// A short, stable cache-busting tag for `sha256`: its first 12 hex characters
+/// (the whole string if shorter), which is already plenty of entropy per
+/// attachment id to change whenever the underlying bytes do.
+fn version_tag(sha256: &str) -> &str {
+    &sha256[..sha256.len().min(12)]
 }
 
 /// The stored thumbnail of exactly `size`; no fallback to another size.

@@ -3,8 +3,10 @@
 use axum::http::{HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 
+pub mod actor;
 pub mod attachments;
 pub mod graphql;
+pub mod upload;
 
 /// `Cache-Control` for content-addressed or versioned responses.
 pub const IMMUTABLE_CACHE: HeaderValue =

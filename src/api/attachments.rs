@@ -34,6 +34,10 @@ use crate::svc::thumbnail_service::ThumbnailService;
 /// The attachment routes, with their state layered on. Originals are read
 /// from the same data dir the thumbnail service reads, so the two can never
 /// disagree.
+///
+/// Reads are open to every actor, so these handlers do not take
+/// `Extension<Actor>`; one that needs to restrict access reads it from the
+/// request as the GraphQL and upload handlers do (see `api::actor`).
 pub fn attachment_routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
     let data_dir = Arc::new(thumbnails.data_dir().to_path_buf());
     Router::new()

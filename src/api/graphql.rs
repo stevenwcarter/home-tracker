@@ -28,12 +28,14 @@ pub fn graphql_routes(pool: SqlitePool, schema: Arc<Schema>, data_dir: Arc<Path>
 }
 
 async fn handle(
+    Extension(actor): Extension<Actor>,
     Extension(schema): Extension<Arc<Schema>>,
     Extension(pool): Extension<SqlitePool>,
     Extension(data_dir): Extension<Arc<Path>>,
     JuniperRequest(request): JuniperRequest,
 ) -> JuniperResponse {
-    // A fresh context per request: auth will fill `actor` from the request here.
-    let context = GraphQLContext::new(pool, Actor::Anonymous, data_dir);
+    // A fresh context per request, for the actor the router attached
+    // (see `api::actor`).
+    let context = GraphQLContext::new(pool, actor, data_dir);
     JuniperResponse(request.execute(&*schema, &context).await)
 }
