@@ -14,6 +14,7 @@ use anyhow::{Context, Result, bail, ensure};
 use axum::http::Uri;
 use axum::http::uri::Scheme;
 use diesel::prelude::*;
+use tracing::info;
 
 use crate::ai::REDACTED;
 use crate::ai::client::{AiClient, ChatRequest, ContentPart, Message, Role};
@@ -78,24 +79,59 @@ impl fmt::Debug for AiConfig {
 
 /// `raw` trimmed and without trailing slashes, so `{base}/chat/completions`
 /// has exactly one slash; refused unless it is an `http`/`https` URL with a
-/// host and no `user:password@` part (credentials in the URL would be sent
-/// and shown on the settings screen; the key has its own write-only field).
-/// The message never echoes the input, which may hold credentials.
+/// host, no `user:password@` part (credentials in the URL would be sent and
+/// shown on the settings screen; the key has its own write-only field), and
+/// no query string or fragment (either would end up in the middle of
+/// `{base}/chat/completions`). The message never echoes the input, which may
+/// hold credentials.
 pub fn normalise_base_url(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
-    let uri = Uri::from_str(trimmed).ok().filter(|uri| {
-        uri.scheme()
-            .is_some_and(|s| *s == Scheme::HTTP || *s == Scheme::HTTPS)
-            && uri.host().is_some_and(|host| !host.is_empty())
-    });
-    let Some(uri) = uri else {
+    let Some(uri) = http_uri(trimmed) else {
         bail!("base URL must be an http:// or https:// URL");
     };
     ensure!(
         !uri.authority().is_some_and(|a| a.as_str().contains('@')),
         "base URL must not contain a user name or password"
     );
+    ensure!(
+        !trimmed.contains(['?', '#']),
+        "base URL must not contain a query string or fragment"
+    );
     Ok(trimmed.to_owned())
+}
+
+/// `url` parsed, when it is an `http`/`https` URL with a host.
+fn http_uri(url: &str) -> Option<Uri> {
+    Uri::from_str(url).ok().filter(|uri| {
+        uri.scheme()
+            .is_some_and(|s| *s == Scheme::HTTP || *s == Scheme::HTTPS)
+            && uri.host().is_some_and(|host| !host.is_empty())
+    })
+}
+
+/// Where a base URL sends the key: its scheme, host (lowercased) and port
+/// (the scheme's default when absent). Two base URLs with the same origin
+/// differ at most in their path.
+#[derive(Debug, PartialEq, Eq)]
+struct Origin {
+    scheme: Scheme,
+    host: String,
+    port: u16,
+}
+
+impl Origin {
+    /// `None` for anything [`normalise_base_url`] would refuse, so a damaged
+    /// stored row never matches a valid new URL.
+    fn of(url: &str) -> Option<Self> {
+        let uri = http_uri(url)?;
+        let scheme = uri.scheme()?.clone();
+        let default_port = if scheme == Scheme::HTTPS { 443 } else { 80 };
+        Some(Self {
+            port: uri.port_u16().unwrap_or(default_port),
+            host: uri.host()?.to_ascii_lowercase(),
+            scheme,
+        })
+    }
 }
 
 /// The settings as the screen shows them, environment overrides applied.
@@ -114,6 +150,11 @@ pub fn view(conn: &mut SqliteConnection, env: &AiEnv) -> Result<AiSettingsView> 
 /// Validates `update` whole, then saves it in one transaction. A field the
 /// environment overrides is refused, naming the variable, if the update
 /// would change it; the base URL shown on screen may be sent back as is.
+///
+/// The key never follows the endpoint to another origin (scheme, host or
+/// port): such a change clears the stored key unless the update carries a
+/// new one, and is refused while the key comes from `OPENAI_API_KEY`, which
+/// this screen cannot clear. A change of path alone keeps the key.
 pub fn update(
     conn: &mut SqliteConnection,
     env: &AiEnv,
@@ -144,6 +185,28 @@ pub fn update(
     }
 
     conn.transaction::<_, anyhow::Error, _>(|conn| {
+        let stored = Stored::load(conn)?;
+        let new_origin = base_url
+            .as_deref()
+            .is_some_and(|url| Origin::of(url) != Origin::of(&stored.base_url));
+        let key = if new_origin {
+            ensure!(
+                env.api_key.is_none(),
+                "the endpoint host cannot change here: the API key comes from \
+                 {API_KEY_VAR} in the environment and would be sent to the new host"
+            );
+            match key {
+                KeyChange::Keep => {
+                    if stored.api_key.is_some() {
+                        info!("the AI endpoint host changed, so the saved API key was cleared");
+                    }
+                    KeyChange::Clear
+                }
+                change => change,
+            }
+        } else {
+            key
+        };
         if let Some(url) = &base_url {
             put(conn, BASE_URL_KEY, Some(url))?;
         }
@@ -438,9 +501,28 @@ mod tests {
             "https://",
             "host/v1",
             "/v1",
+            "https://host/v1?x=1",
+            "https://host/v1#frag",
+            "https://host/v1/?",
         ] {
             assert!(normalise_base_url(bad).is_err(), "{bad:?} was accepted");
         }
+    }
+
+    #[test]
+    fn origins_compare_scheme_host_and_port_but_not_path() {
+        let origin = |url| Origin::of(url).unwrap();
+        let openai = origin("https://api.openai.com/v1");
+        assert_eq!(origin("https://API.openai.com:443/openai/v1"), openai);
+        for other in [
+            "http://api.openai.com/v1",
+            "https://api.openai.com:8443/v1",
+            "https://elsewhere.example/v1",
+        ] {
+            assert_ne!(origin(other), openai, "{other}");
+        }
+        assert_eq!(origin("http://llm.lan/v1"), origin("http://llm.lan:80"));
+        assert_eq!(Origin::of("not a url"), None);
     }
 
     #[test]

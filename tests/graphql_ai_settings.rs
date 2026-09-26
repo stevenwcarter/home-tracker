@@ -1,21 +1,33 @@
 //! The AI settings surface through `/graphql`: defaults, the write-only key,
-//! environment overrides, validation, the connection test, and the write gate.
+//! environment overrides, validation, the endpoint-host rule for the key, the
+//! connection test (through the fake and through the real client), and the
+//! write gate.
+
+// Each test crate uses a different subset of the shared test support.
+#[allow(dead_code)]
+mod support;
 
 use std::sync::Arc;
 
+use axum::http::StatusCode;
 use axum_test::TestServer;
 use home_tracker::ai::AiState;
 use home_tracker::ai::client::{AiError, ChatRequest, ContentPart, Message, Role as ChatRole};
 use home_tracker::ai::env::AiEnv;
 use home_tracker::ai::fake::FakeAiClient;
+use home_tracker::ai::openai::OpenAiClient;
 use home_tracker::db::TestDb;
 use home_tracker::graphql::context::{Actor, Role};
 use home_tracker::routes::{app_with_actor, app_with_ai};
 use home_tracker::svc::ai_settings;
 use serde_json::{Value, json};
+use support::openai_stub::OpenAiStub;
 use tempfile::TempDir;
 
 const KEY: &str = "sk-test-0123456789abcdef";
+/// [`KEY`] as OpenAI echoes a rejected key: the first 8 and last 4 characters.
+const PARTIAL_KEY: &str = "sk-test-************cdef";
+const ELSEWHERE: &str = "https://elsewhere.example/v1";
 
 const SETTINGS: &str = "{ aiSettings {
     baseUrl visionModel synthesisModel extraInstructions hasApiKey fromEnvironment
@@ -61,6 +73,15 @@ fn server() -> (TestServer, TestDb, TempDir) {
     server_with(AiEnv::none())
 }
 
+/// A server with the real [`OpenAiClient`] (no retries) and no environment
+/// overrides, for end-to-end tests against an [`OpenAiStub`].
+fn server_with_real_client() -> (TestServer, TestDb, TempDir) {
+    server_with_ai(AiState {
+        env: AiEnv::none(),
+        client: Arc::new(OpenAiClient::new().with_backoff(vec![])),
+    })
+}
+
 async fn post(server: &TestServer, doc: &str, vars: Value) -> Value {
     let r = server
         .post("/graphql")
@@ -88,13 +109,20 @@ async fn update(server: &TestServer, input: Value) -> Value {
     update_body(server, input).await["data"]["updateAiSettings"].clone()
 }
 
-/// `updateAiSettings` with `input`, which must fail; its first error message.
-async fn update_err(server: &TestServer, input: Value) -> String {
+/// `updateAiSettings` with `input`, which must fail; the whole body and its
+/// first error message.
+async fn update_refused(server: &TestServer, input: Value) -> (Value, String) {
     let body = post(server, UPDATE, json!({ "input": input })).await;
-    body["errors"][0]["message"]
+    let message = body["errors"][0]["message"]
         .as_str()
         .unwrap_or_else(|| panic!("expected an error: {body}"))
-        .to_owned()
+        .to_owned();
+    (body, message)
+}
+
+/// `updateAiSettings` with `input`, which must fail; its first error message.
+async fn update_err(server: &TestServer, input: Value) -> String {
+    update_refused(server, input).await.1
 }
 
 /// A valid input on the defaults, with `extra` merged over it.
@@ -192,12 +220,16 @@ async fn env_key_wins_and_is_reported() {
     assert_eq!(settings["hasApiKey"], json!(true));
     assert!(!body.to_string().contains("env-key"), "key leaked: {body}");
 
-    let err = update_err(&server, input(json!({ "apiKey": KEY }))).await;
+    let (body, err) = update_refused(&server, input(json!({ "apiKey": KEY }))).await;
     assert!(
         err.contains("OPENAI_API_KEY is set in the environment"),
         "{err}"
     );
-    assert!(!err.contains(KEY) && !err.contains("env-key"), "{err}");
+    let shown = body.to_string();
+    assert!(
+        !shown.contains(KEY) && !shown.contains("env-key"),
+        "key leaked: {shown}"
+    );
     // A clear is a change of that field too.
     let err = update_err(&server, input(json!({ "apiKey": "" }))).await;
     assert!(err.contains("OPENAI_API_KEY"), "{err}");
@@ -274,6 +306,94 @@ async fn a_base_url_with_credentials_is_refused() {
     assert!(!err.contains(KEY), "key leaked: {err}");
     let settings = query_body(&server).await["data"]["aiSettings"].clone();
     assert_eq!(settings["baseUrl"], json!("https://api.openai.com/v1"));
+}
+
+#[tokio::test]
+async fn a_base_url_with_a_query_or_fragment_is_refused() {
+    let (server, _db, _data) = server();
+
+    for bad in ["https://host/v1?api-version=1", "https://host/v1#frag"] {
+        let err = update_err(&server, input(json!({ "baseUrl": bad }))).await;
+        assert!(err.contains("query string or fragment"), "{bad:?}: {err}");
+    }
+    let settings = query_body(&server).await["data"]["aiSettings"].clone();
+    assert_eq!(settings["baseUrl"], json!("https://api.openai.com/v1"));
+}
+
+#[tokio::test]
+async fn an_endpoint_host_change_without_a_new_key_clears_the_key() {
+    let (server, db, _data) = server();
+
+    // A different host, scheme or port each send the key somewhere new.
+    for elsewhere in [
+        ELSEWHERE,
+        "http://api.openai.com/v1",
+        "https://api.openai.com:8443/v1",
+    ] {
+        update(&server, input(json!({ "apiKey": KEY }))).await;
+        let settings = update(&server, input(json!({ "baseUrl": elsewhere }))).await;
+        assert_eq!(settings["hasApiKey"], json!(false), "{elsewhere}");
+        assert_eq!(settings["baseUrl"], json!(elsewhere));
+        assert_eq!(stored_key(&db), None, "{elsewhere}");
+    }
+}
+
+#[tokio::test]
+async fn an_endpoint_host_change_with_a_new_key_keeps_the_new_key() {
+    let (server, db, _data) = server();
+    update(&server, input(json!({ "apiKey": KEY }))).await;
+
+    let settings = update(
+        &server,
+        input(json!({ "baseUrl": ELSEWHERE, "apiKey": "sk-elsewhere" })),
+    )
+    .await;
+    assert_eq!(settings["hasApiKey"], json!(true));
+    assert_eq!(stored_key(&db).as_deref(), Some("sk-elsewhere"));
+}
+
+#[tokio::test]
+async fn a_same_host_endpoint_change_keeps_the_key() {
+    let (server, db, _data) = server();
+    update(&server, input(json!({ "apiKey": KEY }))).await;
+
+    // The path, host case and an explicit default port are not a new host.
+    for same in [
+        "https://api.openai.com/openai/v1",
+        "https://API.OpenAI.com/v1",
+        "https://api.openai.com:443/v1",
+    ] {
+        let settings = update(&server, input(json!({ "baseUrl": same }))).await;
+        assert_eq!(settings["hasApiKey"], json!(true), "{same}");
+        assert_eq!(stored_key(&db).as_deref(), Some(KEY), "{same}");
+    }
+}
+
+#[tokio::test]
+async fn an_endpoint_host_change_is_refused_while_the_key_is_from_the_environment() {
+    let (server, _db, _data) = server_with(AiEnv {
+        api_key: Some("env-key".to_owned()),
+        ..AiEnv::none()
+    });
+
+    let (body, err) = update_refused(&server, input(json!({ "baseUrl": ELSEWHERE }))).await;
+    assert!(err.contains("OPENAI_API_KEY"), "{err}");
+    assert!(err.contains("endpoint host"), "{err}");
+    assert!(!body.to_string().contains("env-key"), "key leaked: {body}");
+    let settings = query_body(&server).await["data"]["aiSettings"].clone();
+    assert_eq!(settings["baseUrl"], json!("https://api.openai.com/v1"));
+
+    // The same host on another path is fine.
+    let settings = update(
+        &server,
+        input(json!({ "baseUrl": "https://api.openai.com/openai/v1" })),
+    )
+    .await;
+    assert_eq!(
+        settings["baseUrl"],
+        json!("https://api.openai.com/openai/v1")
+    );
+    assert_eq!(settings["hasApiKey"], json!(true));
 }
 
 #[tokio::test]
@@ -367,6 +487,77 @@ async fn test_connection_reports_the_provider_error() {
     assert_eq!(result["ok"], json!(false), "{result}");
     assert_eq!(result["message"], json!(error.to_string()));
     assert!(!result.to_string().contains(KEY), "key leaked: {result}");
+}
+
+/// A completion from the stub answering the connection test.
+fn stub_completion() -> (StatusCode, Value) {
+    (
+        StatusCode::OK,
+        json!({
+            "model": "stub-model",
+            "choices": [{ "message": { "role": "assistant", "content": "OK" } }],
+        }),
+    )
+}
+
+#[tokio::test]
+async fn test_connection_reaches_the_saved_endpoint_through_the_real_client() {
+    let stub = OpenAiStub::start(|_, _| stub_completion()).await;
+    let (server, _db, _data) = server_with_real_client();
+    update(
+        &server,
+        input(json!({ "baseUrl": format!("{}/v1", stub.base_url), "apiKey": KEY })),
+    )
+    .await;
+
+    let result = test_connection(&server).await;
+    assert_eq!(result["ok"], json!(true), "{result}");
+    let message = result["message"].as_str().unwrap();
+    assert!(
+        message.starts_with("Connected: stub-model answered in "),
+        "{message}"
+    );
+
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 1);
+    let sent = &requests[0];
+    assert_eq!(sent.path, "/v1/chat/completions");
+    assert_eq!(
+        sent.headers["authorization"].to_str().unwrap(),
+        format!("Bearer {KEY}")
+    );
+    assert_eq!(sent.body["model"], json!("gpt-5-mini"));
+    assert_eq!(sent.body["max_completion_tokens"], json!(8));
+}
+
+#[tokio::test]
+async fn test_connection_masks_a_provider_echo_of_the_key() {
+    let stub = OpenAiStub::start(|_, _| {
+        (
+            StatusCode::UNAUTHORIZED,
+            json!({ "error": { "message": format!(
+                "Incorrect API key provided: {PARTIAL_KEY}. You sent: Bearer {KEY}"
+            ) } }),
+        )
+    })
+    .await;
+    let (server, _db, _data) = server_with_real_client();
+    update(
+        &server,
+        input(json!({ "baseUrl": format!("{}/v1", stub.base_url), "apiKey": KEY })),
+    )
+    .await;
+
+    let body = post(&server, TEST_CONNECTION, json!({})).await;
+    assert_eq!(
+        body["data"]["testAiConnection"]["ok"],
+        json!(false),
+        "{body}"
+    );
+    let shown = body.to_string();
+    assert!(shown.contains("Incorrect API key provided"), "{shown}");
+    assert!(!shown.contains(KEY), "key leaked: {shown}");
+    assert!(!shown.contains(PARTIAL_KEY), "partial key leaked: {shown}");
 }
 
 #[tokio::test]

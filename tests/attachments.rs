@@ -609,11 +609,15 @@ async fn existing_thumbnails_survive_the_migration() {
     let dir = tempfile::tempdir().unwrap();
     let pool = db::build_pool(dir.path().join("old.sqlite").to_str().unwrap()).unwrap();
     let mut conn = pool.get().unwrap();
-    let earlier = conn.pending_migrations(MIGRATIONS).unwrap();
-    for migration in earlier
+    // In order: everything before the re-keying, then (after seeding the old
+    // shape) the re-keying itself, then everything after it.
+    let pending = conn.pending_migrations(MIGRATIONS).unwrap();
+    let at = pending
         .iter()
-        .filter(|m| m.name().to_string() != THUMBNAILS_BY_SHA)
-    {
+        .position(|m| m.name().to_string() == THUMBNAILS_BY_SHA)
+        .expect("the re-keying migration is embedded");
+    let (earlier, rest) = pending.split_at(at);
+    for migration in earlier {
         conn.run_migration(migration.as_ref()).unwrap();
     }
 
@@ -645,6 +649,7 @@ async fn existing_thumbnails_survive_the_migration() {
         .unwrap();
     }
 
+    conn.run_migration(rest[0].as_ref()).unwrap();
     db::run_migrations(&mut conn).unwrap();
     assert!(conn.pending_migrations(MIGRATIONS).unwrap().is_empty());
 

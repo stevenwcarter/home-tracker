@@ -21,7 +21,7 @@ export const SettingsPage = () => {
       <div
         role="tablist"
         aria-label="Settings sections"
-        className="mt-4 flex gap-1 overflow-x-auto border-b border-border"
+        className="mt-4 flex gap-1 border-b border-border"
       >
         {SETTINGS_TABS.map(({ id, label }) => {
           const selected = id === active.id;

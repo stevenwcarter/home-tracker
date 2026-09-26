@@ -7,6 +7,9 @@ import { AiSettings, AiSettingsInput, AiTestResult } from 'types/ai';
 
 const API_KEY_VAR = 'OPENAI_API_KEY';
 const BASE_URL_VAR = 'OPENAI_BASE_URL';
+const HOST_CHANGE_NOTE =
+  'Changing the endpoint host cleared the saved key. Enter it again to keep using AI.';
+const TEST_HELP_ID = 'ai-test-help';
 
 interface Draft {
   baseUrl: string;
@@ -27,6 +30,9 @@ const draftOf = (settings: AiSettings): Draft => ({
   apiKey: '',
   clearKey: false,
 });
+
+const sameDraft = (a: Draft, b: Draft) =>
+  (Object.keys(a) as (keyof Draft)[]).every((field) => a[field] === b[field]);
 
 /**
  * The key goes out only when it changes: omitted to keep the saved one (and
@@ -76,23 +82,42 @@ const HelpedField = ({
   </FormField>
 );
 
-const AiSettingsForm = ({ settings }: { settings: AiSettings }) => {
+/**
+ * `initial` seeds the form; after that the form tracks the last saved answer
+ * itself, so a test result or the dirty check never races the refetch.
+ */
+const AiSettingsForm = ({ settings: initial }: { settings: AiSettings }) => {
   const { update, loading: saving } = useUpdateAiSettings();
   const { test, loading: testing } = useTestAiConnection();
-  const [draft, setDraft] = useState(() => draftOf(settings));
+  const [settings, setSettings] = useState(initial);
+  const [draft, setDraft] = useState(() => draftOf(initial));
   const [result, setResult] = useState<AiTestResult | null>(null);
+  const [keyClearedByHost, setKeyClearedByHost] = useState(false);
   const keyFromEnv = settings.fromEnvironment.includes(API_KEY_VAR);
   const baseUrlFromEnv = settings.fromEnvironment.includes(BASE_URL_VAR);
   const incomplete = [draft.baseUrl, draft.visionModel, draft.synthesisModel].some(
     (value) => value.trim() === '',
   );
+  // A test runs against the saved settings, so testing an unsaved draft would mislead.
+  const dirty = !sameDraft(draft, draftOf(settings));
+
+  /** Every draft change goes through here: a shown test result no longer applies. */
+  const edit = (change: Partial<Draft>) => {
+    setDraft((current) => ({ ...current, ...change }));
+    setResult(null);
+  };
 
   const submit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (incomplete || saving) return;
+    setResult(null);
     const saved = await update(inputOf(draft, keyFromEnv));
+    if (!saved) return;
+    // The server clears a saved key when the endpoint host changes without a new one.
+    setKeyClearedByHost(settings.hasApiKey && !saved.hasApiKey && !draft.clearKey);
+    setSettings(saved);
     // The key never comes back, so the field blanks whether or not the rest changed.
-    if (saved) setDraft({ ...draftOf(saved), apiKey: '', clearKey: false });
+    setDraft(draftOf(saved));
   };
 
   const runTest = async () => {
@@ -112,7 +137,7 @@ const AiSettingsForm = ({ settings }: { settings: AiSettings }) => {
           type="text"
           disabled={Boolean(envVar)}
           value={draft[key]}
-          onChange={(event) => setDraft({ ...draft, [key]: event.target.value })}
+          onChange={(event) => edit({ [key]: event.target.value })}
           className={`${INPUT_CLASS} disabled:opacity-60`}
         />
       )}
@@ -125,7 +150,9 @@ const AiSettingsForm = ({ settings }: { settings: AiSettings }) => {
       ? 'The key will be removed when you save.'
       : settings.hasApiKey
         ? 'Key saved. Enter a new key to replace it.'
-        : null;
+        : keyClearedByHost
+          ? HOST_CHANGE_NOTE
+          : null;
 
   return (
     <form aria-label="AI settings" onSubmit={submit} noValidate className="grid max-w-2xl gap-4">
@@ -138,7 +165,7 @@ const AiSettingsForm = ({ settings }: { settings: AiSettings }) => {
             {...control}
             rows={4}
             value={draft.extraInstructions}
-            onChange={(event) => setDraft({ ...draft, extraInstructions: event.target.value })}
+            onChange={(event) => edit({ extraInstructions: event.target.value })}
             className={INPUT_CLASS}
           />
         )}
@@ -152,9 +179,7 @@ const AiSettingsForm = ({ settings }: { settings: AiSettings }) => {
               autoComplete="off"
               disabled={keyFromEnv}
               value={draft.apiKey}
-              onChange={(event) =>
-                setDraft({ ...draft, apiKey: event.target.value, clearKey: false })
-              }
+              onChange={(event) => edit({ apiKey: event.target.value, clearKey: false })}
               className={`${INPUT_CLASS} disabled:opacity-60`}
             />
           )}
@@ -162,7 +187,7 @@ const AiSettingsForm = ({ settings }: { settings: AiSettings }) => {
         {settings.hasApiKey && !keyFromEnv && (
           <button
             type="button"
-            onClick={() => setDraft({ ...draft, apiKey: '', clearKey: true })}
+            onClick={() => edit({ apiKey: '', clearKey: true })}
             disabled={draft.clearKey}
             className={`${SECONDARY_ACTION} mt-6`}
           >
@@ -177,11 +202,17 @@ const AiSettingsForm = ({ settings }: { settings: AiSettings }) => {
         <button
           type="button"
           onClick={runTest}
-          disabled={!settings.hasApiKey || testing}
+          disabled={!settings.hasApiKey || testing || dirty}
+          aria-describedby={dirty ? TEST_HELP_ID : undefined}
           className={SECONDARY_ACTION}
         >
           Test connection
         </button>
+        {dirty && (
+          <p id={TEST_HELP_ID} className="text-sm text-muted">
+            Save your changes to test them
+          </p>
+        )}
       </div>
       <div aria-live="polite">
         {testing && <p className="text-sm text-muted">Testing…</p>}

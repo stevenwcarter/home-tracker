@@ -1142,6 +1142,7 @@ dependencies = [
  "juniper_axum",
  "libsqlite3-sys",
  "mime_guess",
+ "regex",
  "reqwest",
  "rust-embed",
  "serde",

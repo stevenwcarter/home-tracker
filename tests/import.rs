@@ -23,6 +23,7 @@ use home_tracker::schema::{
     template_fields, thumbnails,
 };
 use home_tracker::svc;
+use home_tracker::svc::fixtures;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use support::{MiniBackup, MiniIds, recoloured_photo};
@@ -659,6 +660,56 @@ fn a_reimport_with_changed_bytes_leaves_no_orphaned_thumbnails() {
         .expect("the new bytes have the imported thumbnail");
     assert_eq!(thumb.data, webp);
     assert_eq!(thumbnails::table.count().get_result(&mut conn), Ok(1));
+}
+
+#[test]
+fn a_reimport_keeps_the_old_bytes_while_another_attachment_shares_them() {
+    // The photo's bytes change, but an attachment the backup does not know
+    // about still holds the old sha: its original and thumbnails must stay.
+    let h = Harness::new();
+    h.import().unwrap();
+    let old_sha256 = h.ids.jpeg_sha256.clone();
+    let old = svc::attachment::thumbnail(&mut h.conn(), &old_sha256, 500)
+        .unwrap()
+        .unwrap();
+    diesel::insert_into(thumbnails::table)
+        .values(Thumbnail { size: 300, ..old })
+        .execute(&mut h.conn())
+        .unwrap();
+    diesel::insert_into(attachments::table)
+        .values(fixtures::attachment(
+            "att-sharer",
+            &h.ids.router,
+            AttachmentKind::Photo,
+            false,
+            &old_sha256,
+            10,
+            99,
+        ))
+        .execute(&mut h.conn())
+        .unwrap();
+
+    let (jpeg, _) = recoloured_photo([30, 30, 200]);
+    h.write_blob(&h.ids.photo, &jpeg);
+    h.import().unwrap();
+
+    let mut conn = h.conn();
+    let photo = svc::attachment::get(&mut conn, &h.ids.photo)
+        .unwrap()
+        .unwrap();
+    assert_eq!(photo.sha256, hex::encode(Sha256::digest(&jpeg)));
+    assert!(
+        h.data.path().join("originals").join(&old_sha256).exists(),
+        "the shared original was removed"
+    );
+    for size in [300, 500] {
+        assert!(
+            svc::attachment::thumbnail(&mut conn, &old_sha256, size)
+                .unwrap()
+                .is_some(),
+            "the shared {size}px thumbnail was removed"
+        );
+    }
 }
 
 #[test]

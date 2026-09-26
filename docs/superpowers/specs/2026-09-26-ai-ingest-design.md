@@ -67,7 +67,7 @@ Frontend additions: `page/SettingsPage.tsx` with `AiSettingsTab.tsx`, `page/Inge
 
 | key | default | notes |
 |---|---|---|
-| `ai.base_url` | `https://api.openai.com/v1` | trimmed, trailing slashes stripped; must be an `http`/`https` URL with a host and no `user:password@` part; the error never echoes the input |
+| `ai.base_url` | `https://api.openai.com/v1` | trimmed, trailing slashes stripped; must be an `http`/`https` URL with a host, no `user:password@` part, no query string and no fragment; the error never echoes the input |
 | `ai.api_key` | absent | never returned; `""` or a missing row means "not configured" |
 | `ai.vision_model` | `gpt-5-mini` | |
 | `ai.synthesis_model` | `gpt-5-mini` | |
@@ -85,6 +85,17 @@ when it normalises to the environment value, which is what the screen shows
 and sends back, and the stored row is then left alone. An invalid
 `OPENAI_BASE_URL` fails reads and model calls with a message naming the
 variable rather than falling back to the stored URL.
+
+The key never follows the endpoint to another origin. When an update's
+normalised base URL differs from the stored one in scheme, host or port
+(host compared case-insensitively, a missing port read as the scheme's
+default), a stored key is cleared unless the update carries a new `apiKey`,
+and the response's `hasApiKey` turns false; the screen then says "Changing
+the endpoint host cleared the saved key. Enter it again to keep using AI."
+While the key comes from `OPENAI_API_KEY` (and the base URL does not come
+from `OPENAI_BASE_URL`), such a change is refused with a message naming
+`OPENAI_API_KEY`, since the screen cannot clear an environment key. A
+change of path alone keeps the key.
 
 ### 4.2 Thumbnails re-keyed
 
@@ -387,6 +398,13 @@ admin-only when roles arrive; the ingest routes read `Extension<Actor>` like
 the upload route. Ingest batches carry no owner in v1; an owner column can
 be added when users exist.
 
+Until then every LAN user can write, which the settings rulings take into
+account: an endpoint host change clears a saved key (§4.1), so nobody can
+redirect the stored key to a host of their choosing; but Test connection
+calls whatever host the writer saved and shows up to 500 characters of its
+reply. That second point is documented, not blocked: anyone who can write
+can already point the app anywhere, and it becomes admin-only with roles.
+
 ## 11. Configuration and operations
 
 - `OPENAI_API_KEY`, `OPENAI_BASE_URL` (optional) documented in README and
@@ -396,12 +414,18 @@ be added when users exist.
 - Outbound calls log the model, latency, token usage and the HTTP status at
   `info`; error bodies at `warn`, with the key replaced by `***` and then
   truncated to 500 characters; never the key. Transport errors are reported
-  without the request URL. A provider may echo its own partial mask of a
-  rejected key (OpenAI shows the first 8 and last 4 characters), which then
-  appears in the `warn` line and the error message.
+  without the request URL. The full key never appears; OpenAI's own error
+  bodies may echo a masked fragment, which we also mask: any
+  `sk-[A-Za-z0-9_-]*\*{3,}[A-Za-z0-9_-]*` token, and the key's first 8
+  characters followed by `*`s.
 - Timeouts: 60 s per request (connect to last body byte), 10 s to connect;
   a timeout is not retried.
 - The cleanup job logs how many batches it removed.
+- Phase 7 note: reasoning models count their reasoning tokens against
+  `max_completion_tokens`, so the ingest caps must leave room for reasoning
+  on top of the JSON answer. The runner's own retries
+  compound with the client's (two backoff retries per call), so a runner
+  retry budget multiplies the worst-case calls and wait per item.
 
 ## 12. Testing
 

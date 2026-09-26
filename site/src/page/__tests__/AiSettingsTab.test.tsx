@@ -10,6 +10,9 @@ vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
 
 beforeEach(() => vi.clearAllMocks());
 
+const HOST_CHANGE_NOTE =
+  'Changing the endpoint host cleared the saved key. Enter it again to keep using AI.';
+
 /**
  * An `updateAiSettings` mock that accepts any input and records it, so a test
  * can assert whether `apiKey` was sent at all (equality ignores undefined keys).
@@ -140,6 +143,67 @@ describe('AiSettingsTab', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Test connection' }));
     const result = await screen.findByText('The provider refused the API key (401)');
     expect(result).toHaveClass('text-danger');
+  });
+
+  it('sends an empty key when a typed key is then cleared', async () => {
+    const update = updateMock({ ...AI_SETTINGS, hasApiKey: false });
+    await renderTab([update.mock]);
+    const user = userEvent.setup();
+    await user.type(screen.getByLabelText('API key'), 'sk-x');
+    await user.click(screen.getByRole('button', { name: 'Clear key' }));
+    expect(screen.getByLabelText('API key')).toHaveValue('');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(update.sent()).toEqual({ ...unchanged, apiKey: '' }));
+    // A clear the user asked for is not the endpoint change clearing the key.
+    expect(screen.queryByText(HOST_CHANGE_NOTE)).not.toBeInTheDocument();
+  });
+
+  it('says so when a save to another endpoint host cleared the key', async () => {
+    const elsewhere = 'https://elsewhere.example/v1';
+    const update = updateMock({ ...AI_SETTINGS, baseUrl: elsewhere, hasApiKey: false });
+    await renderTab([update.mock]);
+    const user = userEvent.setup();
+    await user.clear(screen.getByLabelText('Base URL'));
+    await user.type(screen.getByLabelText('Base URL'), elsewhere);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(update.sent()).toEqual({ ...unchanged, baseUrl: elsewhere }));
+    expect(await screen.findByText(HOST_CHANGE_NOTE)).toBeInTheDocument();
+    expect(screen.getByLabelText('API key')).toHaveAccessibleDescription(HOST_CHANGE_NOTE);
+  });
+
+  it('clears the test result on an edit and on a save', async () => {
+    const update = updateMock();
+    await renderTab([testMock(true, 'first answer'), testMock(true, 'second answer'), update.mock]);
+    const user = userEvent.setup();
+    const test = screen.getByRole('button', { name: 'Test connection' });
+    await user.click(test);
+    expect(await screen.findByText('first answer')).toBeInTheDocument();
+    await user.type(screen.getByLabelText('Vision model'), 'x');
+    expect(screen.queryByText('first answer')).not.toBeInTheDocument();
+
+    await user.type(screen.getByLabelText('Vision model'), '{Backspace}');
+    await user.click(test);
+    expect(await screen.findByText('second answer')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+    await waitFor(() => expect(update.sent()).toEqual(unchanged));
+    expect(screen.queryByText('second answer')).not.toBeInTheDocument();
+  });
+
+  it('disables Test connection while there are unsaved changes', async () => {
+    await renderTab([]);
+    const user = userEvent.setup();
+    const test = screen.getByRole('button', { name: 'Test connection' });
+    expect(test).toBeEnabled();
+    expect(test).not.toHaveAccessibleDescription();
+
+    await user.type(screen.getByLabelText('API key'), 'sk-new');
+    expect(test).toBeDisabled();
+    expect(test).toHaveAccessibleDescription('Save your changes to test them');
+
+    await user.clear(screen.getByLabelText('API key'));
+    expect(test).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: 'Clear key' }));
+    expect(test).toBeDisabled();
   });
 
   it('disables Test connection until a key is saved', async () => {

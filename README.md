@@ -186,7 +186,8 @@ the model or sees the key.
 - **Base URL:** the endpoint, default `https://api.openai.com/v1`; any
   OpenAI-compatible server works. Calls go to `{base URL}/chat/completions`.
   Trailing slashes are stripped; the URL must be `http://` or `https://`
-  with a host, and one carrying a `user:password@` part is refused.
+  with a host, and one carrying a `user:password@` part, a query string or
+  a fragment is refused.
 - **Vision model:** describes each photo. Default `gpt-5-mini`.
 - **Synthesis model:** combines the photo descriptions into one item
   suggestion, and answers the connection test. Default `gpt-5-mini`.
@@ -197,10 +198,25 @@ the model or sees the key.
   or log line ever contains the key again. Leaving the field blank keeps
   the saved key; typing a new one replaces it; Clear key removes it on Save.
 
+**Changing the endpoint host clears the saved key.** A save whose base URL
+has a different scheme, host or port from the saved one removes the saved
+key unless the same save types a new one, so the key is never sent to a
+server it was not entered for; the tab then says "Changing the endpoint
+host cleared the saved key. Enter it again to keep using AI." A change of
+path alone (`/v1` to `/openai/v1`) keeps the key. While the key comes from
+`OPENAI_API_KEY`, which the tab cannot clear, a host change is refused
+unless `OPENAI_BASE_URL` sets the endpoint too.
+
 **Test connection** sends one tiny request (the synthesis model is asked to
-reply "OK", capped at 8 output tokens) and shows which model answered and
-how many milliseconds it took, or the provider's error. It is disabled until
-a key is set, and it costs a few tokens.
+reply "OK", capped at 8 output tokens) to the saved settings and shows which
+model answered and how many milliseconds it took, or the provider's error.
+It is disabled until a key is set and while the form has unsaved changes
+("Save your changes to test them"); any edit or save clears the last
+result. It costs a few tokens. It calls whatever host the saved base URL
+names and shows up to 500 characters of that host's reply. Every LAN user
+can change the settings in v1 (there is no login), so this is documented
+rather than blocked; it goes away as a concern when settings become
+admin-only.
 
 **Environment variables win.** When `OPENAI_API_KEY` or `OPENAI_BASE_URL`
 is set, it overrides the saved value; the tab shows that field disabled with
@@ -217,7 +233,9 @@ and 5xx after 1 s and then 4 s. A provider that refuses
 `response_format: json_schema` is asked once more with `json_object`, and
 one that refuses `max_completion_tokens` once more with `max_tokens`. Each
 call logs its model, status, latency and token counts at `info`; an error
-body is logged at `warn`, cut to 500 characters, with the key masked.
+body is logged at `warn`, cut to 500 characters, with the key masked. The
+full key never appears; OpenAI's own error bodies may echo a masked
+fragment (such as `sk-proj-****cdef`), which we also mask.
 
 ## Project layout
 

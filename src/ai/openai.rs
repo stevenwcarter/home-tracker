@@ -8,13 +8,15 @@
 //! (providers without structured outputs; the caller validates the JSON),
 //! and a 400 naming `max_completion_tokens` is resent with the cap as
 //! `max_tokens` (providers that predate OpenAI's rename). No error or log
-//! line carries the key.
+//! line carries the key, nor a provider's own partial echo of it.
 
 use std::error::Error;
 use std::iter;
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use regex::Regex;
 use reqwest::{Client, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -36,6 +38,13 @@ const BACKOFF: [Duration; 2] = [Duration::from_secs(1), Duration::from_secs(4)];
 const SNIPPET_CHARS: usize = 500;
 /// What replaces the key wherever a provider echoes it.
 const MASK: &str = "***";
+/// How many leading characters of the key a provider's partial echo shows.
+const ECHOED_PREFIX_CHARS: usize = 8;
+
+/// OpenAI's partial echo of a rejected key, e.g. `sk-proj-****...cdef`.
+static PARTIAL_ECHO: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"sk-[A-Za-z0-9_-]*\*{3,}[A-Za-z0-9_-]*").expect("the pattern is valid")
+});
 
 /// Calls an OpenAI-compatible provider. Stateless apart from the connection
 /// pool: every call takes the current [`AiConfig`], so saved settings apply
@@ -180,13 +189,29 @@ fn transport_error(err: reqwest::Error, key: &str) -> AiError {
     AiError::Transport(mask(&message, key))
 }
 
-/// `text` with every occurrence of `key` replaced by [`MASK`].
+/// `text` with the key replaced by [`MASK`] wherever it appears whole, and
+/// wherever a provider echoes part of it: OpenAI's `sk-...***...` form, or
+/// the key's first [`ECHOED_PREFIX_CHARS`] characters followed by `*`s.
 fn mask(text: &str, key: &str) -> String {
-    if key.is_empty() {
+    let whole = if key.is_empty() {
         text.to_owned()
     } else {
         text.replace(key, MASK)
+    };
+    let masked = PARTIAL_ECHO.replace_all(&whole, MASK);
+    match prefix_echo(key) {
+        Some(echo) => echo.replace_all(&masked, MASK).into_owned(),
+        None => masked.into_owned(),
     }
+}
+
+/// Matches the key's first [`ECHOED_PREFIX_CHARS`] characters followed by
+/// `*`s (and any visible tail); `None` for a key no longer than that, which
+/// the whole-key replacement already covers.
+fn prefix_echo(key: &str) -> Option<Regex> {
+    let (end, _) = key.char_indices().nth(ECHOED_PREFIX_CHARS)?;
+    let pattern = format!(r"{}\*+[A-Za-z0-9_-]*", regex::escape(&key[..end]));
+    Regex::new(&pattern).ok()
 }
 
 /// An error body fit for a message or a log: key masked, then cut to
@@ -442,6 +467,33 @@ mod tests {
         let cut = snippet(&body, key);
         assert_eq!(cut, format!("{}***", "x".repeat(495)));
         assert!(!snippet(&format!("{}{key}", "x".repeat(498)), key).contains("sk-"));
+    }
+
+    #[test]
+    fn snippets_mask_a_provider_partial_echo_of_the_key() {
+        let key = "sk-proj-0123456789abcdef";
+        let body = "Incorrect API key provided: sk-proj-************cdef. Also sk-***.";
+        assert_eq!(
+            snippet(body, key),
+            "Incorrect API key provided: ***. Also ***."
+        );
+        // Another sk- key's echo is masked too; a word without stars is not.
+        assert_eq!(snippet("sk-other-****wxyz sk-free", key), "*** sk-free");
+    }
+
+    #[test]
+    fn snippets_mask_the_key_prefix_followed_by_stars() {
+        let key = "gsk_abcd1234efgh5678";
+        assert_eq!(
+            snippet("key gsk_abcd****** refused", key),
+            "key *** refused"
+        );
+        assert_eq!(
+            snippet("key gsk_abcd**5678 refused", key),
+            "key *** refused"
+        );
+        // The prefix alone, without stars, is not an echo.
+        assert_eq!(snippet("gsk_abcd", key), "gsk_abcd");
     }
 
     #[test]
