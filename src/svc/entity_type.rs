@@ -58,6 +58,25 @@ fn require(conn: &mut SqliteConnection, id: &str) -> Result<EntityType> {
     get(conn, id)?.ok_or_else(|| anyhow!("entity type not found"))
 }
 
+/// How many entities of this type sit directly inside an entity whose type is
+/// neither a location nor this type (a parent of this type flips with it).
+/// While this is non-zero the type cannot become a location type, or a
+/// location would end up under an item.
+pub fn non_location_parent_count(conn: &mut SqliteConnection, type_id: &str) -> Result<i64> {
+    let parents = alias!(entities as parents);
+    entities::table
+        .inner_join(parents.on(entities::parent_id.eq(parents.field(entities::id).nullable())))
+        .inner_join(
+            entity_types::table.on(parents.field(entities::entity_type_id).eq(entity_types::id)),
+        )
+        .filter(entities::entity_type_id.eq(type_id))
+        .filter(entity_types::is_location.eq(false))
+        .filter(parents.field(entities::entity_type_id).ne(type_id))
+        .count()
+        .get_result(conn)
+        .with_context(|| format!("counting non-location parents of type {type_id:?}"))
+}
+
 /// How many entities of this type directly contain at least one location.
 /// While this is non-zero the type cannot stop being a location type, or a
 /// location would end up under an item.
@@ -111,6 +130,17 @@ pub fn update(
                  children; move them first",
                 current.name,
                 entity_count_phrase(holders)
+            );
+        }
+        if !current.is_location && changes.is_location {
+            let nested = non_location_parent_count(conn, id)?;
+            ensure!(
+                nested == 0,
+                "cannot make {} a location type while {} of that type {} inside \
+                 non-location entities; move them first",
+                current.name,
+                entity_count_phrase(nested),
+                if nested == 1 { "sits" } else { "sit" }
             );
         }
         diesel::update(entity_types::table.find(id))
@@ -242,6 +272,68 @@ mod tests {
         assert_eq!(updated.description.as_deref(), Some("desc"));
         assert_eq!(updated.created_at, before.created_at);
         assert!(updated.updated_at > before.updated_at);
+    }
+
+    /// Inserts a `type_id` entity `id` under `parent` at `seq`.
+    fn insert(conn: &mut SqliteConnection, id: &str, type_id: &str, parent: &str, seq: i64) {
+        diesel::insert_into(entities::table)
+            .values(fixtures::entity(id, id, type_id, Some(parent), seq))
+            .execute(conn)
+            .unwrap();
+    }
+
+    #[test]
+    fn update_allows_item_to_location_while_every_item_sits_under_a_location() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        seed_sample(&mut conn);
+        // Screws sits under Tote A, whose type is a location; the rest under locations or the root.
+        assert_eq!(
+            non_location_parent_count(&mut conn, ITEM_TYPE_ID).unwrap(),
+            0
+        );
+
+        let updated = update(&mut conn, ITEM_TYPE_ID, input("Item", true)).unwrap();
+        assert!(updated.is_location);
+    }
+
+    #[test]
+    fn update_refuses_item_to_location_while_an_item_sits_under_another_non_location_type() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let kit = create(&mut conn, input("Kit", false)).unwrap();
+        insert(&mut conn, "Case", &kit.id, &ids.garage, 50);
+        insert(&mut conn, "Bit", ITEM_TYPE_ID, "Case", 51);
+        insert(&mut conn, "Blade", ITEM_TYPE_ID, "Case", 52);
+        assert_eq!(
+            non_location_parent_count(&mut conn, ITEM_TYPE_ID).unwrap(),
+            2
+        );
+
+        let err = update(&mut conn, ITEM_TYPE_ID, input("Item", true)).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "cannot make Item a location type while 2 entities of that type sit inside \
+             non-location entities; move them first"
+        );
+        assert!(!get(&mut conn, ITEM_TYPE_ID).unwrap().unwrap().is_location);
+    }
+
+    #[test]
+    fn update_allows_item_to_location_when_the_item_parent_flips_too() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        // Bit sits under Drill, an Item: both become locations, so no location ends up in an item.
+        insert(&mut conn, "Bit", ITEM_TYPE_ID, &ids.drill, 50);
+        assert_eq!(
+            non_location_parent_count(&mut conn, ITEM_TYPE_ID).unwrap(),
+            0
+        );
+
+        let updated = update(&mut conn, ITEM_TYPE_ID, input("Item", true)).unwrap();
+        assert!(updated.is_location);
     }
 
     #[test]
