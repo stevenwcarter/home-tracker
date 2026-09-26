@@ -22,7 +22,8 @@
 //! Every error answers `{ "error": "<message>" }` with its status: 400 for a
 //! missing or duplicate `file` field or a malformed form, 403, 404 for an
 //! unknown entity, 413, 415 for a format we do not accept, 422 for an image
-//! whose header does not decode, 500 (logged, with a path-free message).
+//! whose header or pixel data does not decode (or exceeds the decode limits),
+//! 500 (logged, with a path-free message).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -254,8 +255,8 @@ async fn receive(mut multipart: Multipart, originals_dir: PathBuf) -> Result<For
 /// The file work runs on the blocking pool, fed chunk by chunk. A stream
 /// error (a client that goes away, or the body limit tripping) or a file
 /// growing past [`MAX_UPLOAD_BYTES`] is forwarded to the writer, which then
-/// drops the temp file (removing it) without flushing or syncing it. The writer is always awaited, so the temp file is
-/// gone before the response is.
+/// drops the temp file (removing it) without flushing or syncing it. The
+/// writer is always awaited, so the temp file is gone before the response is.
 ///
 /// Each upload in flight holds one blocking-pool thread for as long as the
 /// client takes to send it: acceptable for a household LAN app without auth,

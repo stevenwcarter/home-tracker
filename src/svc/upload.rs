@@ -362,7 +362,8 @@ mod tests {
     use super::*;
     use crate::db::TestDb;
     use crate::svc::fixtures::{
-        SampleIds, jpeg, png, png_header, png_header_rgba16, png_truncated_body, seed_sample,
+        SampleIds, attachment as attachment_row, jpeg, png, png_header, png_header_rgba16,
+        png_truncated_body, seed_sample,
     };
 
     /// A migrated, seeded database and an empty data dir with `originals/`.
@@ -583,6 +584,44 @@ mod tests {
             .get_result(&mut h.db.pool.get().unwrap())
             .unwrap();
         assert_eq!(rows, 0);
+    }
+
+    #[test]
+    fn an_unreadable_upload_sharing_an_imported_original_leaves_it_in_place() {
+        // Imported originals are never decode-checked, so a damaged one can
+        // already be stored when an upload brings the same bytes.
+        let h = Harness::new();
+        let bytes = png_truncated_body(64, 64);
+        let sha = sha256_hex(&bytes);
+        let original = attachment::original_path(h.data.path(), &sha);
+        fs::write(&original, &bytes).unwrap();
+        let imported = attachment_row(
+            "imported-photo",
+            &h.ids.old_tv,
+            AttachmentKind::Photo,
+            true,
+            &sha,
+            7,
+            50,
+        );
+        let mut conn = h.db.pool.get().unwrap();
+        diesel::insert_into(attachments::table)
+            .values(&imported)
+            .execute(&mut conn)
+            .unwrap();
+        drop(conn);
+
+        let err = h.upload(&h.ids.screws, &bytes, None, false).unwrap_err();
+
+        assert!(matches!(err, UploadError::Unreadable), "{err:?}");
+        assert_eq!(h.files(), [sha.as_str()], "no temp file, original kept");
+        assert_eq!(fs::read(&original).unwrap(), bytes);
+        let mut conn = h.db.pool.get().unwrap();
+        assert_eq!(
+            attachment::get(&mut conn, "imported-photo").unwrap(),
+            Some(imported)
+        );
+        assert!(h.primaries(&h.ids.screws).is_empty());
     }
 
     #[test]
