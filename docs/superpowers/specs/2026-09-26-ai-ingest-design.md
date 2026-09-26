@@ -27,12 +27,12 @@ accounting, and running analysis for photos already attached to an entity.
 | # | Decision | Choice |
 |---|---|---|
 | 1 | Where the AI calls run | Server only. The browser never sees the key or the endpoint. |
-| 2 | API style | Chat Completions (`POST {base_url}/chat/completions`) with `image_url` content parts. Synthesis asks for `response_format: {type: "json_schema", strict}`; if the endpoint rejects `json_schema` (HTTP 400 whose body mentions `response_format`), retry once with `{type: "json_object"}` and validate the JSON ourselves. |
+| 2 | API style | Chat Completions (`POST {base_url}/chat/completions`) with `image_url` content parts. Synthesis asks for `response_format: {type: "json_schema", strict}`; if the endpoint rejects `json_schema` (HTTP 400 whose body mentions `response_format`), retry once with `{type: "json_object"}` and validate the JSON ourselves. The output cap goes out as `max_completion_tokens` (current OpenAI models refuse `max_tokens`); on an HTTP 400 whose body names `max_completion_tokens`, resend once with `max_tokens` for older compatible servers. Neither resend uses up a retry. |
 | 3 | Key storage | Plaintext in the `settings` table. The SQLite file is treated as secret (documented). Encryption at rest can follow later without a schema change. |
 | 4 | Environment overrides | `OPENAI_API_KEY` and `OPENAI_BASE_URL` win over the stored values when set. The AI tab shows those fields as "set from environment" and disabled. |
 | 5 | Models | Two settings: `vision_model` (per-photo step) and `synthesis_model` (combine step), both default `gpt-5-mini`. Free-text fields. |
 | 6 | Extra instructions | One optional free-text setting appended to both system prompts. |
-| 7 | Test connection | A mutation that sends a tiny text-only chat completion to the synthesis model and reports ok/failure with latency. |
+| 7 | Test connection | A mutation that sends a tiny text-only chat completion to the synthesis model ("Reply with the single word OK.", capped at 8 tokens) and reports ok/failure with latency: `Connected: <model> answered in <n> ms`, or the `AiError` message. Without a key it answers `ok: false` without calling out. |
 | 8 | Batch staging | Server-staged: photos are uploaded immediately into ingest tables backed by the same content-hash originals store. A page reload resumes the batch. |
 | 9 | Progress transport | Server-Sent Events as a change signal; the GraphQL `ingestBatch` query is the source of truth and is refetched (debounced) on every event and on (re)connect. No polling. |
 | 10 | Image sent to the model | The 1200 px WebP rendition as a base64 `data:` URL with `detail: "auto"`. Never the original bytes. |
@@ -53,7 +53,7 @@ accounting, and running analysis for photos already attached to an entity.
 New backend modules:
 
 - `svc/ai_settings.rs`: read/write of the `ai.*` settings rows, env overrides, `AiConfig` (resolved values) and `AiSettingsView` (what GraphQL returns: never the key).
-- `ai/`: `client.rs` (`AiClient` trait: `chat(ChatRequest) -> ChatResponse`), `openai.rs` (`OpenAiClient` on reqwest with rustls and webpki roots), `prompts.rs` (system prompts, JSON schemas), `fake.rs` (test client answering from a queue, `cfg(test)` plus the integration tests' support module).
+- `ai/`: `client.rs` (`AiClient` trait: `chat(ChatRequest) -> ChatResponse`), `openai.rs` (`OpenAiClient` on reqwest with rustls and webpki roots), `prompts.rs` (system prompts, JSON schemas), `fake.rs` (`FakeAiClient`, a test client answering from a queue; public rather than `cfg(test)` so the integration tests can use it), `env.rs` (`AiEnv`, the two `OPENAI_*` overrides). `ai/mod.rs` holds `AiState { env, client }`, which the router hands to every GraphQL context (`AiState::disabled()` for routers built without a real client).
 - `svc/ingest.rs` (batches, items, photos: create/list/get/accept/skip/cleanup) and `ingest/runner.rs` (the pipeline: describe photos, synthesise, publish events).
 - `ingest/events.rs`: an `IngestEvents` hub, one `tokio::sync::broadcast` channel per live batch, dropped when the batch finishes or nobody listens.
 - `api/ingest.rs`: the staging upload and the SSE route.
@@ -67,16 +67,24 @@ Frontend additions: `page/SettingsPage.tsx` with `AiSettingsTab.tsx`, `page/Inge
 
 | key | default | notes |
 |---|---|---|
-| `ai.base_url` | `https://api.openai.com/v1` | trailing slash stripped; must parse as an `http`/`https` URL |
+| `ai.base_url` | `https://api.openai.com/v1` | trimmed, trailing slashes stripped; must be an `http`/`https` URL with a host and no `user:password@` part; the error never echoes the input |
 | `ai.api_key` | absent | never returned; `""` or a missing row means "not configured" |
 | `ai.vision_model` | `gpt-5-mini` | |
 | `ai.synthesis_model` | `gpt-5-mini` | |
 | `ai.extra_instructions` | absent | free text, at most 4000 characters |
 
-Seeded by the migration except the key and the instructions. Environment:
+Seeded by the migration except the key and the instructions; a missing
+seeded row is an error, never silently replaced by the default. Environment:
 `OPENAI_API_KEY` overrides `ai.api_key`, `OPENAI_BASE_URL` overrides
-`ai.base_url`; when set, the corresponding update is refused with a message
-naming the variable.
+`ai.base_url` (blank values count as unset). When a variable is set, an
+update that would change its field is refused with a message naming the
+variable, and the other fields still save: with `OPENAI_API_KEY` set, any
+`apiKey` other than omitted/null is refused, including `""`; with
+`OPENAI_BASE_URL` set, `baseUrl` (a required input field) is accepted only
+when it normalises to the environment value, which is what the screen shows
+and sends back, and the stored row is then left alone. An invalid
+`OPENAI_BASE_URL` fails reads and model calls with a message naming the
+variable rather than falling back to the stored URL.
 
 ### 4.2 Thumbnails re-keyed
 
@@ -301,7 +309,8 @@ attachment of kind `photo` (else none), then deletes the ingest photo rows
 user's choice; the batch's parent is only the default. `acceptIngestItem` and
 `skipIngestItem` refuse items not in `ready` or `failed`. `submitIngestBatch`
 refuses a batch with no photos at all. Mutations that touch a batch bump
-`updated_at`.
+`updated_at`. `testAiConnection` loads the resolved config and releases its
+database connection before awaiting the model.
 
 ## 7. HTTP endpoints
 
@@ -334,10 +343,13 @@ paragraph of each system prompt.
 - **Settings**: `/settings` redirects to `/settings/ai`. `SettingsPage`
   renders a tab bar (`role="tablist"`) and the active tab. `AiSettingsTab`:
   base URL, vision model, synthesis model, extra instructions (textarea),
-  API key (`type="password"`, blank; a "Key saved" note and a "Clear key"
-  button when `hasApiKey`), env-provided fields disabled with "set from
-  environment"; Save; Test connection with the result inline. Nav gains
-  "Settings".
+  API key (`type="password"`, always blank; a "Key saved" note and a
+  "Clear key" button when `hasApiKey` and the key is not from the
+  environment), env-provided fields disabled with "Set from OPENAI_... in
+  the environment"; Save (it omits `apiKey` unless a key was typed or
+  cleared, and sends blank extra instructions as null); Test connection
+  (disabled without a key) with the result inline in an `aria-live` region.
+  Nav gains "Settings".
 - **Entry**: `LocationPage` and `ItemPage` show "Add item(s) with AI" when
   `hasApiKey`, else a muted "Set up AI" link. Clicking creates a batch with
   the page's entity as parent and navigates to `/ingest/:batchId`. If
@@ -382,7 +394,13 @@ be added when users exist.
 - reqwest with `rustls-tls-webpki-roots` so the scratch image needs no CA
   store. `cargo tree -i openssl` stays empty.
 - Outbound calls log the model, latency, token usage and the HTTP status at
-  `info`; error bodies at `warn` truncated to 500 characters; never the key.
+  `info`; error bodies at `warn`, with the key replaced by `***` and then
+  truncated to 500 characters; never the key. Transport errors are reported
+  without the request URL. A provider may echo its own partial mask of a
+  rejected key (OpenAI shows the first 8 and last 4 characters), which then
+  appears in the `warn` line and the error message.
+- Timeouts: 60 s per request (connect to last body byte), 10 s to connect;
+  a timeout is not retried.
 - The cleanup job logs how many batches it removed.
 
 ## 12. Testing
@@ -422,7 +440,7 @@ be added when users exist.
 ## 14. Phases
 
 **Phase 6: settings and AI client.** Thumbnails re-keyed by sha256 with the
-`BlobSource` refactor; `ai.*` settings with env overrides; `AiClient`,
+`Blob` refactor; `ai.*` settings with env overrides; `AiClient`,
 `OpenAiClient`, `FakeAiClient`, prompts; `aiSettings`, `updateAiSettings`,
 `testAiConnection`; settings screen with the AI tab and nav link. Exit: a key
 saved in the UI is never shown again, "Test connection" succeeds against a

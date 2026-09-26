@@ -7,7 +7,9 @@ trusts every request as a writer. Phase 1 shipped the backend, the database,
 and a home page with four statistic cards. Phase 2 added the full inventory
 schema, a GraphQL query surface over it, and an importer that reads a Homebox
 backup so the app can run on real data. Phases 3 and 4 added browsing and
-editing, and phase 5 adds photo uploads with a gallery on every entity page.
+editing, phase 5 added photo uploads with a gallery on every entity page,
+and phase 6 adds a settings screen where an OpenAI-compatible model is
+configured for the AI item ingest that follows.
 
 ## Run with Docker
 
@@ -32,7 +34,7 @@ on every push.
 | `OPENAI_BASE_URL` | unset | OpenAI-compatible endpoint; overrides the saved base URL |
 
 An API key saved from the settings screen is stored in plaintext in the
-SQLite database, so treat the database file as a secret.
+SQLite database, so treat the database file as a secret (see Settings).
 
 The Docker image ships `env.prod`, which sets `DATABASE_URL=/data/db.sqlite`
 and `DATA_DIR=/data` to match the `/data` volume.
@@ -84,7 +86,8 @@ and locations by name.
 
 Every attachment is reachable at `GET /attachments/{id}` (the original) and
 `GET /attachments/{id}/thumb/{size}` (a thumbnail, generated on demand at
-300/500/1200px and cached in the `thumbnails` table thereafter). Both URLs
+300/500/1200px and cached in the `thumbnails` table thereafter, keyed by
+the original's SHA-256, so attachments with the same bytes share them). Both URLs
 carry `?v=<sha256 prefix>`, so they can be cached by the browser forever and
 still pick up new bytes after a re-import; each response also sets a matching
 `ETag`.
@@ -173,6 +176,49 @@ use it, and let you create, edit in place, and delete from the same table.
   while any entity of that type sits inside an item of another type.
 - A tag colour that is not a hex value (`#rgb`, `#rrggbb` or `#rrggbbaa`).
 
+## Settings
+
+The Settings link in the header opens `/settings`, a tabbed screen that
+lands on its only tab so far, AI (`/settings/ai`). The AI tab configures
+the OpenAI-compatible model the server calls; the browser never talks to
+the model or sees the key.
+
+- **Base URL:** the endpoint, default `https://api.openai.com/v1`; any
+  OpenAI-compatible server works. Calls go to `{base URL}/chat/completions`.
+  Trailing slashes are stripped; the URL must be `http://` or `https://`
+  with a host, and one carrying a `user:password@` part is refused.
+- **Vision model:** describes each photo. Default `gpt-5-mini`.
+- **Synthesis model:** combines the photo descriptions into one item
+  suggestion, and answers the connection test. Default `gpt-5-mini`.
+- **Extra instructions:** optional free text, at most 4000 characters,
+  appended to both system prompts.
+- **API key:** write-only. The field is always blank: once a key is saved
+  it reads "Key saved" with a Clear key button, and no query, error message
+  or log line ever contains the key again. Leaving the field blank keeps
+  the saved key; typing a new one replaces it; Clear key removes it on Save.
+
+**Test connection** sends one tiny request (the synthesis model is asked to
+reply "OK", capped at 8 output tokens) and shows which model answered and
+how many milliseconds it took, or the provider's error. It is disabled until
+a key is set, and it costs a few tokens.
+
+**Environment variables win.** When `OPENAI_API_KEY` or `OPENAI_BASE_URL`
+is set, it overrides the saved value; the tab shows that field disabled with
+"Set from OPENAI_... in the environment", a save that would change it is
+refused with a message naming the variable, and the other fields still save.
+An environment key is never written to the database.
+
+**The SQLite file holds the API key: treat it as a secret.** A key saved
+here is stored in plaintext in the `settings` table, so the database file
+and every backup of it carry the key.
+
+Each model call has a 60 s timeout (10 s to connect) and is retried on 429
+and 5xx after 1 s and then 4 s. A provider that refuses
+`response_format: json_schema` is asked once more with `json_object`, and
+one that refuses `max_completion_tokens` once more with `max_tokens`. Each
+call logs its model, status, latency and token counts at `info`; an error
+body is logged at `warn`, cut to 500 characters, with the key masked.
+
 ## Project layout
 
 ```
@@ -193,7 +239,7 @@ home-tracker/
 │   ├── svc/            business logic, one file per aggregate
 │   ├── graphql/        juniper: context, schema, query, objects/ (one file per type)
 │   ├── import/         Homebox backup importer: source, tables, run, report
-│   ├── ai/             model client seam, OPENAI_* environment overrides
+│   ├── ai/             OpenAI-compatible client, fake, prompts, OPENAI_* overrides
 │   ├── api/            axum handlers: graphql, attachments, upload, actor middleware
 │   ├── routes.rs       router, compression, embedded SPA, /assets cache
 │   └── healthcheck.rs
@@ -218,3 +264,5 @@ home-tracker/
 - Phase 3 plan: [`docs/superpowers/plans/2026-09-26-phase-3-browsing.md`](docs/superpowers/plans/2026-09-26-phase-3-browsing.md)
 - Phase 4 plan: [`docs/superpowers/plans/2026-09-27-phase-4-editing.md`](docs/superpowers/plans/2026-09-27-phase-4-editing.md)
 - Phase 5 plan: [`docs/superpowers/plans/2026-09-28-phase-5-photos.md`](docs/superpowers/plans/2026-09-28-phase-5-photos.md)
+- AI ingest spec: [`docs/superpowers/specs/2026-09-26-ai-ingest-design.md`](docs/superpowers/specs/2026-09-26-ai-ingest-design.md)
+- Phase 6 plan: [`docs/superpowers/plans/2026-09-26-phase-6-settings-and-ai-client.md`](docs/superpowers/plans/2026-09-26-phase-6-settings-and-ai-client.md)
