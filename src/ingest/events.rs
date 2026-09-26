@@ -86,6 +86,13 @@ impl IngestEvents {
         self.channels().remove(batch_id);
     }
 
+    /// Tells batch `batch_id`'s streams it was deleted: a batch event, so a
+    /// viewer refetches and finds it gone, then the end.
+    pub fn removed(&self, batch_id: &str) {
+        self.publish(batch_id, IngestEvent::new(EventKind::Batch, batch_id));
+        self.close(batch_id);
+    }
+
     /// A poisoned lock only means a publisher panicked mid-insert; the map
     /// is still usable.
     fn channels(&self) -> MutexGuard<'_, HashMap<String, broadcast::Sender<IngestEvent>>> {
@@ -118,6 +125,18 @@ mod tests {
         let mut receiver = events.subscribe("b1");
         events.publish("b1", IngestEvent::new(EventKind::Batch, "b1"));
         events.close("b1");
+        assert_eq!(
+            receiver.try_recv(),
+            Ok(IngestEvent::new(EventKind::Batch, "b1"))
+        );
+        assert_eq!(receiver.try_recv(), Err(TryRecvError::Closed));
+    }
+
+    #[test]
+    fn removed_sends_a_batch_event_then_ends_the_stream() {
+        let events = IngestEvents::new();
+        let mut receiver = events.subscribe("b1");
+        events.removed("b1");
         assert_eq!(
             receiver.try_recv(),
             Ok(IngestEvent::new(EventKind::Batch, "b1"))

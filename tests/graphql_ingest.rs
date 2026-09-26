@@ -6,12 +6,14 @@ use std::fs;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
 use axum::http::StatusCode;
 use axum_test::TestServer;
 use axum_test::multipart::{MultipartForm, Part};
 use diesel::prelude::*;
 use diesel::r2d2::{ConnectionManager, PooledConnection};
 use home_tracker::ai::AiState;
+use home_tracker::ai::client::{AiClient, AiError, ChatRequest, ChatResponse, ContentPart};
 use home_tracker::ai::env::AiEnv;
 use home_tracker::ai::fake::FakeAiClient;
 use home_tracker::db::{ITEM_TYPE_ID, TestDb};
@@ -20,6 +22,7 @@ use home_tracker::kinds::{IngestBatchStatus, IngestItemStatus};
 use home_tracker::models::{Entity, IngestBatch, IngestItem, IngestPhoto};
 use home_tracker::routes::{app_with_actor, app_with_ai};
 use home_tracker::schema::{entities, ingest_batches, ingest_items, ingest_photos};
+use home_tracker::svc::ai_settings::AiConfig;
 use home_tracker::svc::fixtures::{self, SampleIds, jpeg, seed_sample};
 use home_tracker::svc::{attachment, ingest};
 use serde_json::{Value, json};
@@ -63,9 +66,11 @@ const RETRY: &str = "mutation($id: ID!) { retryIngestItem(id: $id) { id status e
 /// How long a test waits for the runner, which answers from the fake at once.
 const RUNNER_BOUND: Duration = Duration::from_secs(10);
 
-/// A seeded server whose model is `fake`, with an API key configured.
+/// A seeded server with an API key configured, whose model is `fake`
+/// unless the test brings its own client.
 struct Fixture {
     server: TestServer,
+    /// The scripted model; left empty when the test brings its own client.
     fake: Arc<FakeAiClient>,
     db: TestDb,
     data: TempDir,
@@ -74,16 +79,25 @@ struct Fixture {
 
 impl Fixture {
     fn new() -> Self {
+        let fake = Arc::new(FakeAiClient::new());
+        Self::build(Arc::clone(&fake) as _, fake)
+    }
+
+    /// A fixture whose model is `client`.
+    fn with_client(client: Arc<dyn AiClient>) -> Self {
+        Self::build(client, Arc::new(FakeAiClient::new()))
+    }
+
+    fn build(client: Arc<dyn AiClient>, fake: Arc<FakeAiClient>) -> Self {
         let db = TestDb::new();
         let ids = seed_sample(&mut db.pool.get().unwrap());
         let data = tempfile::tempdir().unwrap();
-        let fake = Arc::new(FakeAiClient::new());
         let ai = AiState {
             env: AiEnv {
                 api_key: Some("test-key".to_owned()),
                 base_url: None,
             },
-            client: Arc::clone(&fake) as _,
+            client,
         };
         let server = TestServer::new(app_with_ai(
             db.pool.clone(),
@@ -248,6 +262,41 @@ fn str_of<'a>(value: &'a Value, what: &str) -> &'a str {
         .unwrap_or_else(|| panic!("{what} is not a string: {value}"))
 }
 
+/// Answers every vision call with a photo description and every synthesis
+/// call with a suggestion, whatever order the runner makes them in.
+struct ByKind;
+
+#[async_trait]
+impl AiClient for ByKind {
+    async fn chat(&self, _: &AiConfig, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        let vision = request
+            .messages
+            .iter()
+            .flat_map(|message| &message.content)
+            .any(|part| matches!(part, ContentPart::ImageUrl { .. }));
+        let content = if vision {
+            json!({
+                "kind": "photo",
+                "summary": "A cordless drill",
+                "text": null,
+                "details": {},
+            })
+        } else {
+            json!({
+                "name": "Cordless drill",
+                "quantity": 1,
+                "tag_names": [],
+                "confidence": "high",
+            })
+        };
+        Ok(ChatResponse {
+            content: content.to_string(),
+            usage: None,
+            model: request.model,
+        })
+    }
+}
+
 /// Every ingest row and every entity, in a stable order.
 #[derive(Debug, PartialEq)]
 struct Snapshot {
@@ -399,6 +448,90 @@ async fn create_add_upload_submit_review_accept_flow() {
         f.originals(),
         2,
         "the files stay, shared by the attachments"
+    );
+}
+
+#[tokio::test]
+async fn two_items_two_photos_accept_and_skip_show_the_new_item_in_its_location() {
+    let f = Fixture::with_client(Arc::new(ByKind));
+    let (batch_id, first_item) = f.create(Some(&f.ids.garage)).await;
+    let second_item = f
+        .data(
+            "mutation($id: ID!) { addIngestItem(batchId: $id) { id } }",
+            json!({ "id": batch_id }),
+        )
+        .await["addIngestItem"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let front = f.stage(&first_item, jpeg(64, 48), "front.jpg").await;
+    let receipt = f.stage(&first_item, jpeg(48, 64), "receipt.jpg").await;
+    f.stage(&second_item, jpeg(40, 30), "other-1.jpg").await;
+    f.stage(&second_item, jpeg(30, 40), "other-2.jpg").await;
+
+    f.data(SUBMIT, json!({ "id": batch_id })).await;
+    let reviewing = f.wait_for_status(&batch_id, "REVIEWING").await;
+
+    let statuses: Vec<&Value> = reviewing["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|item| &item["status"])
+        .collect();
+    assert_eq!(statuses, ["READY", "READY"], "{reviewing}");
+    assert_eq!(f.originals(), 4);
+    let accepted = f
+        .data(
+            ACCEPT,
+            json!({
+                "id": first_item,
+                "input": {
+                    "name": "My drill",
+                    "entityTypeId": ITEM_TYPE_ID,
+                    "parentId": f.ids.garage,
+                },
+                "kinds": [
+                    { "photoId": front["id"], "kind": "PHOTO" },
+                    { "photoId": receipt["id"], "kind": "RECEIPT" },
+                ],
+            }),
+        )
+        .await["acceptIngestItem"]
+        .clone();
+    assert_eq!(
+        f.originals(),
+        4,
+        "accepting moves the files to attachments, it copies none"
+    );
+    f.data(SKIP, json!({ "id": second_item })).await;
+
+    assert_eq!(f.batch(&batch_id).await["status"], "DONE");
+    assert_eq!(f.originals(), 2, "the skipped item's files are gone");
+    let garage = f
+        .data(
+            "query($id: ID!) { entity(id: $id) { items {
+                id name primaryPhoto { title } attachments { kind title }
+            } } }",
+            json!({ "id": f.ids.garage }),
+        )
+        .await["entity"]
+        .clone();
+    let drill = garage["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["id"] == accepted["id"])
+        .unwrap_or_else(|| panic!("the new item is not in the garage: {garage}"));
+    assert_eq!(drill["name"], "My drill");
+    assert_eq!(drill["primaryPhoto"]["title"], "front.jpg");
+    let mut attachments = drill["attachments"].as_array().unwrap().clone();
+    attachments.sort_by_key(|a| a["title"].as_str().unwrap().to_owned());
+    assert_eq!(
+        attachments,
+        [
+            json!({ "kind": "PHOTO", "title": "front.jpg" }),
+            json!({ "kind": "RECEIPT", "title": "receipt.jpg" }),
+        ]
     );
 }
 

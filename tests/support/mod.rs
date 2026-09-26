@@ -1,9 +1,13 @@
-//! A synthetic Homebox backup mirroring the real export's shapes: three types,
+//! Shared test support: log capture ([`logs`]), a fake OpenAI server
+//! ([`openai_stub`]) and upload helpers ([`upload`]). This file holds a
+//! synthetic Homebox backup mirroring the real export's shapes: three types,
 //! four entities in a two-level tree, two nested tags, one custom field, a
 //! photo with its WebP thumbnail, a PDF manual, one template with one field,
 //! and one (unsupported) maintenance entry. Test-only code: failures panic.
 
+pub mod logs;
 pub mod openai_stub;
+pub mod upload;
 
 use std::fs::{self, File};
 use std::io::{Cursor, Write};

@@ -29,7 +29,8 @@ use super::client::{
 use crate::svc::ai_settings::AiConfig;
 
 /// How long one request may take, from connecting to the last body byte.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// Generous, since a reasoning model can spend over a minute on one call.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long connecting may take.
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// The waits before the retries of a 429 or 5xx; one retry per entry.
@@ -56,7 +57,7 @@ pub struct OpenAiClient {
 }
 
 impl OpenAiClient {
-    /// A client with a 60 s request timeout, a 10 s connect timeout and
+    /// A client with a 120 s request timeout, a 10 s connect timeout and
     /// retries after 1 s and 4 s.
     ///
     /// # Panics
@@ -459,6 +460,14 @@ impl WireUsage {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Reasoning models can spend over a minute on one call before answering.
+    #[test]
+    fn a_new_client_allows_two_minutes_per_call() {
+        let client = OpenAiClient::new();
+        assert_eq!(client.timeout, Duration::from_secs(120));
+        assert_eq!(client.backoff, BACKOFF);
+    }
 
     #[test]
     fn snippets_mask_the_key_before_truncating() {

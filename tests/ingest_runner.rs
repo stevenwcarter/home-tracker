@@ -2,6 +2,10 @@
 //! description, synthesis, failures that stay local to a photo or an item,
 //! retry, the model-call bound, events, and resuming after a restart.
 
+// Each test crate uses a different subset of the shared support.
+#[allow(dead_code)]
+mod support;
+
 use std::collections::HashMap;
 use std::fs;
 use std::sync::Arc;
@@ -23,13 +27,14 @@ use home_tracker::ingest::events::{IngestEvent, IngestEvents};
 use home_tracker::ingest::runner::{DESCRIBE_MAX_TOKENS, IngestRunner, SYNTHESIS_MAX_TOKENS};
 use home_tracker::kinds::{IngestBatchStatus, IngestItemStatus, IngestPhotoStatus};
 use home_tracker::models::{IngestBatch, IngestItem, IngestPhoto};
-use home_tracker::schema::settings;
+use home_tracker::schema::{settings, thumbnails};
 use home_tracker::svc::ai_settings::{AiConfig, EXTRA_INSTRUCTIONS_KEY};
 use home_tracker::svc::fixtures::{self, jpeg, seed_sample};
 use home_tracker::svc::thumbnail_service::ThumbnailService;
 use home_tracker::svc::{attachment, ingest};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use support::logs::Logs;
 use tempfile::TempDir;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast::Receiver;
@@ -867,4 +872,44 @@ async fn a_failed_settle_does_not_abort_the_other_items() {
         assert_eq!(f.item(&item.id).status, IngestItemStatus::Ready);
     }
     assert_eq!(f.batch(&batch.id).status, IngestBatchStatus::Reviewing);
+}
+
+#[tokio::test]
+async fn a_batch_deleted_mid_run_calls_nothing_more_and_logs_no_error() {
+    let (logs, _guard) = Logs::capture();
+    let client = GatedClient::new(0);
+    let f = Fixture::new(client.clone());
+    // One photo more than the model-call bound, so one waits for a permit.
+    let (batch, _) = f.submitted(5);
+
+    let thumbnail_count = || -> i64 {
+        thumbnails::table
+            .count()
+            .get_result(&mut f.db.pool.get().unwrap())
+            .unwrap()
+    };
+    let seeded = thumbnail_count();
+
+    let runner = Arc::clone(&f.runner);
+    let batch_id = batch.id.clone();
+    let run = tokio::spawn(async move { runner.run_batch(&batch_id).await });
+    // Every photo prepared, so deleting the originals cannot fail one.
+    wait_for("four calls in flight and every photo prepared", || {
+        client.in_flight.load(Ordering::SeqCst) == 4 && thumbnail_count() == seeded + 5
+    })
+    .await;
+    ingest::delete_batch(&mut f.db.pool.get().unwrap(), f.data.path(), &batch.id).unwrap();
+    client.gate.add_permits(5);
+    let result = time::timeout(Duration::from_secs(10), run)
+        .await
+        .expect("the run finishes")
+        .unwrap();
+
+    // The waiting photo found its row gone once a permit freed, and was not
+    // sent to the model.
+    assert_eq!(client.calls.load(Ordering::SeqCst), 4);
+    assert!(result.is_err(), "the batch is gone");
+    let text = logs.text();
+    assert!(!text.contains("ERROR"), "{text}");
+    assert!(text.contains("batch removed mid-run"), "{text}");
 }

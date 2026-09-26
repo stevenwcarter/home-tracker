@@ -10,7 +10,7 @@ import { useTags } from 'hooks/useTags';
 import { itemType } from 'types/builtIns';
 import type { AttachmentKind, EntityInput } from 'types/entity';
 import type { IngestBatch, IngestItem, IngestPhoto } from 'types/ingest';
-import { kindOfPhoto, nextReviewable, suggestionToInput } from 'utils/ingest';
+import { kindOfPhoto, suggestionToInput } from 'utils/ingest';
 
 /** The kinds a staged photo can be saved as; `ATTACHMENT` is the model's "other". */
 const KIND_OPTIONS: ReadonlyArray<[AttachmentKind, string]> = [
@@ -175,14 +175,13 @@ const FailedItem = ({ item }: { item: IngestItem }) => {
 };
 
 /**
- * The review pane: the next `READY` or `FAILED` item in batch order, or a
- * waiting note while none is. Saving or skipping one refetches the batch,
- * which moves the pane on to the next; the pane is keyed by item, so kinds and
- * form state never carry over.
+ * The review pane for `item` (see `useReviewedItem`), or a waiting note while
+ * there is none. Saving or skipping it refetches the batch, which moves the
+ * pane on to the next; the pane is keyed by item, so kinds and form state
+ * never carry over.
  */
-export const IngestReview = ({ batch }: { batch: IngestBatch }) => {
+export const IngestReview = ({ batch, item }: { batch: IngestBatch; item: IngestItem | null }) => {
   const headingId = useId();
-  const item = nextReviewable(batch);
   if (!item) {
     return (
       <p role="status" className="mt-6 text-muted">

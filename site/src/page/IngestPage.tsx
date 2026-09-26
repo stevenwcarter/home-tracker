@@ -5,15 +5,26 @@ import { IngestCollect } from 'components/ingest/IngestCollect';
 import { IngestDone } from 'components/ingest/IngestDone';
 import { IngestProgress } from 'components/ingest/IngestProgress';
 import { IngestReview } from 'components/ingest/IngestReview';
+import { useReviewedItem } from 'components/ingest/useReviewedItem';
 import { PageSkeleton } from 'components/PageSkeleton';
 import { useEntity } from 'hooks/useEntity';
 import { useIngestBatch } from 'hooks/useIngestBatch';
 import { NotFound } from 'page/NotFound';
 import type { IngestBatch } from 'types/ingest';
 import { entityPath } from 'utils/entityPath';
-import { nextReviewable } from 'utils/ingest';
 
 const TITLE = 'Add items with AI';
+
+/** Progress and review, both on the item under review. */
+const Reviewing = ({ batch }: { batch: IngestBatch }) => {
+  const item = useReviewedItem(batch);
+  return (
+    <>
+      <IngestProgress batch={batch} currentId={item?.id} />
+      <IngestReview batch={batch} item={item} />
+    </>
+  );
+};
 
 /** The screen for where the batch stands. */
 const Stage = ({ batch, back }: { batch: IngestBatch; back: BackLink | null }) => {
@@ -22,12 +33,7 @@ const Stage = ({ batch, back }: { batch: IngestBatch; back: BackLink | null }) =
       return <IngestCollect batch={batch} back={back} />;
     case 'PROCESSING':
     case 'REVIEWING':
-      return (
-        <>
-          <IngestProgress batch={batch} currentId={nextReviewable(batch)?.id} />
-          <IngestReview batch={batch} />
-        </>
-      );
+      return <Reviewing batch={batch} />;
     case 'DONE':
       return <IngestDone batch={batch} back={back} />;
     default: {

@@ -36,7 +36,7 @@ accounting, and running analysis for photos already attached to an entity.
 | 8 | Batch staging | Server-staged: photos are uploaded immediately into ingest tables backed by the same content-hash originals store. A page reload resumes the batch. |
 | 9 | Progress transport | Server-Sent Events as a change signal; the GraphQL `ingestBatch` query is the source of truth and is refetched (debounced) on every event and on (re)connect. No polling. |
 | 10 | Image sent to the model | The 1200 px WebP rendition as a base64 `data:` URL with `detail: "auto"`. Never the original bytes. |
-| 11 | Concurrency | One process-wide semaphore of 4 model calls. Items in a batch run in parallel; photos within an item run in parallel; synthesis waits for the item's photos. Per call: 60 s timeout, two retries with backoff (1 s, 4 s) on 429 and 5xx, none on 4xx. |
+| 11 | Concurrency | One process-wide semaphore of 4 model calls. Items in a batch run in parallel; photos within an item run in parallel; synthesis waits for the item's photos. Per call: 120 s timeout, two retries with backoff (1 s, 4 s) on 429 and 5xx, none on 4xx. |
 | 12 | Fields the AI may fill | `name`, `description`, `manufacturer`, `model_number`, `serial_number`, `quantity`, `purchase_date`, `purchase_from`, `purchase_price_cents`, `warranty_expires`, `lifetime_warranty`, `warranty_details`, `notes`, plus `tag_names` restricted to existing tag names. |
 | 13 | Photo kinds | Each photo is classified `photo`, `receipt`, `warranty`, `manual` or `other` (stored as `attachment` on accept). The first `photo`-kind image becomes the primary photo. The user can change kinds in review. |
 | 14 | Review form | The existing `EntityForm` prefilled from the suggestion, type defaulting to Item, parent defaulting to the entity the batch was started from. |
@@ -266,7 +266,11 @@ batch back to `reviewing`. Accept, skip and retry each publish an `item`
 event, then a `batch` event when the batch status changed, and close the
 channel when the batch is now `done`. Accepting or skipping the last open
 item moves the batch to `done`. `deleteIngestBatch` removes everything (files
-refcounted) and closes the channel.
+refcounted), publishes a `batch` event (so another viewer refetches and gets
+NotFound), then closes the channel. A runner step that finds its row gone
+(the batch was deleted mid-run) logs it at `info`, not `error`, and a photo
+whose row is gone once a model-call permit is free is not sent to the
+model.
 
 The runner holds no DB connection across a model call. Model calls run on the
 async runtime (reqwest); DB work runs in `spawn_blocking`. A server restart
@@ -276,7 +280,8 @@ resets the `analysing` items of every `processing` batch to `queued` and
 runs each such batch again in the background. Cleanup deletes batches with
 no activity for 7 days (`updated_at`, bumped by every mutation and upload
 that touches the batch, including accept and skip) at startup and every
-24 h, logs the count, and closes the deleted batches' channels.
+24 h, logs the count, and publishes a `batch` event to each deleted batch's
+channel before closing it.
 
 ## 6. GraphQL
 
@@ -469,8 +474,13 @@ rather than failing the item.
   - `processing`/`reviewing` (`IngestProgress` and `IngestReview`): a
     progress strip (`aria-live`, one chip per item, "Item N: Queued /
     Analysing / Ready / Failed / Saved / Skipped", `aria-current` on the
-    item under review) and the review pane for `nextReviewable(batch)`,
-    the first item in `ready` or `failed`: photos strip with a "Kind of
+    item under review) and the review pane for that same item, which
+    `useReviewedItem` pins: it stays on the item it shows while that item
+    is still `ready` or `failed`, so another item turning ready (or a
+    retried one coming back) on a refetch never swaps the form out
+    mid-edit, and only once it is accepted, skipped, queued again or gone
+    does it move to `nextReviewable(batch)`, the first item in `ready` or
+    `failed`. The pane shows a photos strip with a "Kind of
     photo N" select per photo (default: the suggested kind) and a
     collapsible "What the AI saw" (summary and transcribed text),
     "Confidence: x. reasoning" above an `EntityForm` in create mode seeded
@@ -522,7 +532,7 @@ can already point the app anywhere, and it becomes admin-only with roles.
   bodies may echo a masked fragment, which we also mask: any
   `sk-[A-Za-z0-9_-]*\*{3,}[A-Za-z0-9_-]*` token, and the key's first 8
   characters followed by `*`s.
-- Timeouts: 60 s per request (connect to last body byte), 10 s to connect;
+- Timeouts: 120 s per request (connect to last body byte), 10 s to connect;
   a timeout is not retried.
 - The cleanup job logs how many batches it removed.
 - Phase 7 note: reasoning models count their reasoning tokens against

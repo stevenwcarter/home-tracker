@@ -17,11 +17,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Error, Result};
 use base64::prelude::{BASE64_STANDARD, Engine as _};
 use chrono::{TimeDelta, Utc};
 use diesel::prelude::*;
-use tokio::sync::Semaphore;
+use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio::task::{self, JoinSet};
 use tokio::time::{self, Instant};
 use tracing::{error, info, warn};
@@ -72,6 +72,15 @@ enum PhotoFailure {
     Ai(#[from] AiError),
     #[error(transparent)]
     Parse(#[from] ParseError),
+}
+
+/// What asking the model about one photo came to.
+enum Vision {
+    Described(PhotoDescription),
+    Failed(PhotoFailure),
+    /// The photo's row went (its batch was deleted) while it waited for a
+    /// permit, so the model was not asked.
+    Removed,
 }
 
 /// How a photo's task ended, as far as its item cares.
@@ -170,15 +179,15 @@ impl IngestRunner {
         Ok(count)
     }
 
-    /// Deletes every batch idle for [`STALE_AFTER`], ends their progress
-    /// streams, and logs how many went.
+    /// Deletes every batch idle for [`STALE_AFTER`], tells their progress
+    /// streams they are gone, and logs how many went.
     pub async fn cleanup_stale(&self) -> Result<usize> {
         let data_dir = self.thumbnails.data_dir().to_path_buf();
         let cutoff = Utc::now().naive_utc() - STALE_AFTER;
         let removed = self
             .db(move |conn| ingest::cleanup_stale(conn, &data_dir, cutoff))
             .await?;
-        removed.iter().for_each(|id| self.events.close(id));
+        removed.iter().for_each(|id| self.events.removed(id));
         info!(removed = removed.len(), "removed abandoned ingest batches");
         Ok(removed.len())
     }
@@ -213,19 +222,25 @@ impl IngestRunner {
         let mut first_error = None;
         while let Some((item_id, result)) = tasks.next().await {
             if let Err(reason) = result {
-                error!(item = %item_id, "ingest item analysis failed: {reason}");
+                log_error(&item_id, "ingest item analysis failed", &reason);
                 if let Err(err) = self.fail_item(batch_id, &item_id, TASK_FAILED).await {
-                    error!(item = %item_id, "could not mark the ingest item failed: {err:#}");
+                    log_error(&item_id, "could not mark the ingest item failed", &err);
                 }
             }
-            if let Err(err) = self.settle(batch_id).await {
-                error!(batch = %batch_id, "could not settle the ingest batch: {err:#}");
-                first_error.get_or_insert(err);
-            }
+            self.settle_or_keep(batch_id, &mut first_error).await;
         }
         // Covers a run with no items and a settle that failed above.
-        self.settle(batch_id).await?;
+        self.settle_or_keep(batch_id, &mut first_error).await;
         first_error.map_or(Ok(()), Err)
+    }
+
+    /// Settles batch `batch_id`; a failure is logged and kept in
+    /// `first_error` unless an earlier one is there already.
+    async fn settle_or_keep(&self, batch_id: &str, first_error: &mut Option<Error>) {
+        if let Err(err) = self.settle(batch_id).await {
+            log_error(batch_id, "could not settle the ingest batch", &err);
+            first_error.get_or_insert(err);
+        }
     }
 
     /// Claims queued item `item_id` (any other status: nothing to do),
@@ -279,9 +294,9 @@ impl IngestRunner {
             match result {
                 Ok(outcome) => not_configured |= outcome == PhotoOutcome::NotConfigured,
                 Err(reason) => {
-                    error!(photo = %photo_id, "describing an ingest photo failed: {reason}");
+                    log_error(&photo_id, "describing an ingest photo failed", &reason);
                     if let Err(err) = self.fail_photo(&batch_id, &photo_id, TASK_FAILED).await {
-                        error!(photo = %photo_id, "could not mark the ingest photo failed: {err:#}");
+                        log_error(&photo_id, "could not mark the ingest photo failed", &err);
                         first_error.get_or_insert(err);
                     }
                 }
@@ -297,7 +312,8 @@ impl IngestRunner {
     }
 
     /// Describes `photo` (1-based `position` of its item's `total`), stores
-    /// the description or the failure, and publishes the change.
+    /// the description or the failure, and publishes the change. A photo
+    /// whose row is gone by the time it may call the model is skipped.
     async fn describe_photo(
         &self,
         config: &AiConfig,
@@ -306,8 +322,12 @@ impl IngestRunner {
         position: usize,
         total: usize,
     ) -> Result<PhotoOutcome> {
-        match self.describe(config, &photo, position, total).await {
-            Ok(description) => {
+        match self.describe(config, &photo, position, total).await? {
+            Vision::Removed => {
+                info!(photo = %photo.id, "ingest photo not described: batch removed mid-run");
+                Ok(PhotoOutcome::Settled)
+            }
+            Vision::Described(description) => {
                 let id = photo.id.clone();
                 let json = description.to_json();
                 self.db(move |conn| {
@@ -317,7 +337,7 @@ impl IngestRunner {
                 self.publish(batch_id, EventKind::Photo, &photo.id);
                 Ok(PhotoOutcome::Settled)
             }
-            Err(failure) => {
+            Vision::Failed(failure) => {
                 warn!(photo = %photo.id, "ingest photo not described: {failure}");
                 self.fail_photo(batch_id, &photo.id, &failure.to_string())
                     .await?;
@@ -329,14 +349,51 @@ impl IngestRunner {
         }
     }
 
-    /// One vision call: the photo's largest thumbnail as a data URL.
+    /// One vision call with the photo's largest thumbnail as a data URL,
+    /// unless the photo's row is gone once a permit is free: a batch deleted
+    /// while its photos queue for the model must not be paid for. `Err` only
+    /// for the database read.
     async fn describe(
         &self,
         config: &AiConfig,
         photo: &IngestPhoto,
         position: usize,
         total: usize,
-    ) -> Result<PhotoDescription, PhotoFailure> {
+    ) -> Result<Vision> {
+        let request = match self.vision_request(config, photo, position, total).await {
+            Ok(request) => request,
+            Err(failure) => return Ok(Vision::Failed(failure)),
+        };
+        let _permit = match self.permit().await {
+            Ok(permit) => permit,
+            Err(err) => return Ok(Vision::Failed(err.into())),
+        };
+        let id = photo.id.clone();
+        if self
+            .db(move |conn| ingest::get_photo(conn, &id))
+            .await?
+            .is_none()
+        {
+            return Ok(Vision::Removed);
+        }
+        let described = self
+            .ai
+            .client
+            .chat(config, request)
+            .await
+            .map_err(PhotoFailure::from)
+            .and_then(|answer| Ok(parse::parse_description(&answer.content)?));
+        Ok(described.map_or_else(Vision::Failed, Vision::Described))
+    }
+
+    /// The vision request for `photo`: its largest thumbnail as a data URL.
+    async fn vision_request(
+        &self,
+        config: &AiConfig,
+        photo: &IngestPhoto,
+        position: usize,
+        total: usize,
+    ) -> Result<ChatRequest, PhotoFailure> {
         let thumbnail = match self
             .thumbnails
             .get_or_generate(&Blob::from(photo), ThumbSize::LARGEST)
@@ -349,7 +406,7 @@ impl IngestRunner {
                 return Err(PhotoFailure::NotPrepared);
             }
         };
-        let request = ChatRequest {
+        Ok(ChatRequest {
             model: config.vision_model.clone(),
             messages: vec![
                 system_message(VISION_SYSTEM, config),
@@ -369,9 +426,7 @@ impl IngestRunner {
                 schema: prompts::photo_description_schema(),
             }),
             max_tokens: Some(DESCRIBE_MAX_TOKENS),
-        };
-        let answer = self.call(config, request).await?;
-        Ok(parse::parse_description(&answer.content)?)
+        })
     }
 
     /// One synthesis call over every described photo of item `item_id`; the
@@ -444,13 +499,17 @@ impl IngestRunner {
 
     /// One model call, holding a permit for exactly its duration.
     async fn call(&self, config: &AiConfig, request: ChatRequest) -> Result<ChatResponse, AiError> {
+        let _permit = self.permit().await?;
+        self.ai.client.chat(config, request).await
+    }
+
+    /// A permit for one model call.
+    async fn permit(&self) -> Result<SemaphorePermit<'_>, AiError> {
         // The semaphore is never closed; the error is unreachable in practice.
-        let _permit = self
-            .permits
+        self.permits
             .acquire()
             .await
-            .map_err(|_| AiError::Transport("the model-call limiter is closed".to_owned()))?;
-        self.ai.client.chat(config, request).await
+            .map_err(|_| AiError::Transport("the model-call limiter is closed".to_owned()))
     }
 
     /// Moves batch `batch_id` on if its items allow, publishing a change and
@@ -544,12 +603,12 @@ impl<T: Send + 'static> Tasks<T> {
         self.rows.insert(handle.id(), row);
     }
 
-    /// The next task to finish: its row and its value, or why it failed.
-    async fn next(&mut self) -> Option<(String, Result<T, String>)> {
+    /// The next task to finish: its row and its value, or why it failed
+    /// (its error, or its panic).
+    async fn next(&mut self) -> Option<(String, Result<T>)> {
         let (task, result) = match self.set.join_next_with_id().await? {
-            Ok((task, Ok(value))) => (task, Ok(value)),
-            Ok((task, Err(err))) => (task, Err(format!("{err:#}"))),
-            Err(err) => (err.id(), Err(err.to_string())),
+            Ok((task, result)) => (task, result),
+            Err(err) => (err.id(), Err(err.into())),
         };
         Some((self.rows.remove(&task).unwrap_or_default(), result))
     }
@@ -598,6 +657,20 @@ fn data_url(thumbnail: &Thumbnail) -> String {
 /// Logs a background run's failure; there is no caller to return it to.
 fn log_failure(what: &str, id: &str, result: Result<()>) {
     if let Err(err) = result {
-        error!(%id, "ingest {what} run failed: {err:#}");
+        log_error(id, &format!("ingest {what} run failed"), &err);
+    }
+}
+
+/// Logs `err`, a failed step on row `id`. A row that is not found means its
+/// batch was deleted (by the user, or by cleanup) mid-run: nothing is wrong,
+/// so that is `info`; anything else is an `error`.
+fn log_error(id: &str, what: &str, err: &Error) {
+    if matches!(
+        err.downcast_ref::<IngestError>(),
+        Some(IngestError::NotFound(_))
+    ) {
+        info!(%id, "{what}: batch removed mid-run");
+    } else {
+        error!(%id, "{what}: {err:#}");
     }
 }

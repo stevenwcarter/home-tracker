@@ -2,23 +2,22 @@
 //! and the `/ingest/photos/{id}` routes that serve it, which share their
 //! header-emitting code with the attachment routes.
 
+// Each test crate uses a different subset of the shared support.
+#[allow(dead_code)]
+mod support;
+
 use std::fs;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{self, Body};
+use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode, header};
-use axum::response::Response;
-use axum_test::multipart::{MultipartForm, Part};
 use axum_test::{TestResponse, TestServer};
 use diesel::prelude::*;
 use home_tracker::api::upload::{MAX_UPLOAD_BYTES, MULTIPART_OVERHEAD_BYTES};
 use home_tracker::db::TestDb;
-use home_tracker::graphql::context::{Actor, Role};
 use home_tracker::models::IngestItem;
 use home_tracker::routes::{app_with_actor, app_with_thumbnails};
 use home_tracker::schema::{ingest_photos, thumbnails};
@@ -27,14 +26,14 @@ use home_tracker::svc::ingest;
 use home_tracker::svc::thumbnail_service::ThumbnailService;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use support::upload::{
+    Untouchable, error_message, json_body, multipart_type, photo_form, read_only, streamed_request,
+};
 use tempfile::TempDir;
-use tokio::io::{self, AsyncRead, ReadBuf};
 use tokio::time;
-use tokio_util::io::ReaderStream;
 use tower::ServiceExt;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
-const BOUNDARY: &str = "home-tracker-test-boundary";
 
 /// A seeded database, a data dir, a collecting batch with one item, and a
 /// server whose thumbnail service the test can inspect.
@@ -87,7 +86,7 @@ impl Fixture {
 
     async fn stage(&self, item_id: &str, bytes: Vec<u8>) -> TestResponse {
         self.server
-            .post(&format!("/api/ingest/items/{item_id}/photos"))
+            .post(&stage_uri(item_id))
             .multipart(photo_form(bytes))
             .await
     }
@@ -118,23 +117,9 @@ impl Fixture {
     }
 }
 
-/// A form holding `bytes` as the `file` field, named `photo.jpg`.
-fn photo_form(bytes: Vec<u8>) -> MultipartForm {
-    MultipartForm::new().add_part(
-        "file",
-        Part::bytes(bytes)
-            .file_name("photo.jpg")
-            .mime_type("image/jpeg"),
-    )
-}
-
-/// The `{ "error": … }` message of a JSON error response.
-fn error_message(response: &TestResponse) -> String {
-    let body: Value = response.json();
-    body["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("expected a JSON error body: {body}"))
-        .to_owned()
+/// The staging route of item `item_id`.
+fn stage_uri(item_id: &str) -> String {
+    format!("/api/ingest/items/{item_id}/photos")
 }
 
 fn header_text(response: &TestResponse, name: &str) -> String {
@@ -143,38 +128,6 @@ fn header_text(response: &TestResponse, name: &str) -> String {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
-}
-
-/// A body that records being polled and never yields.
-struct Untouchable(Arc<AtomicBool>);
-
-impl AsyncRead for Untouchable {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        _: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        self.0.store(true, Ordering::SeqCst);
-        Poll::Pending
-    }
-}
-
-fn multipart_type() -> String {
-    format!("multipart/form-data; boundary={BOUNDARY}")
-}
-
-async fn json_body(response: Response) -> Value {
-    let bytes = body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("not JSON ({err}): {bytes:?}"))
-}
-
-fn read_only() -> Actor {
-    Actor::User {
-        id: "u1".to_owned(),
-        role: Role::ReadOnly,
-    }
 }
 
 /// `url` without its query string.
@@ -347,12 +300,7 @@ async fn read_only_actor_is_403() {
     let f = Fixture::new();
     let router = app_with_actor(f.db.pool.clone(), f.data.path().to_path_buf(), read_only());
     let polled = Arc::new(AtomicBool::new(false));
-    let request = Request::post(format!("/api/ingest/items/{}/photos", f.item.id))
-        .header(header::CONTENT_TYPE, multipart_type())
-        .body(Body::from_stream(ReaderStream::new(Untouchable(
-            Arc::clone(&polled),
-        ))))
-        .unwrap();
+    let request = streamed_request(&stage_uri(&f.item.id), Untouchable(Arc::clone(&polled)));
 
     let response = time::timeout(Duration::from_secs(2), router.oneshot(request))
         .await
@@ -405,7 +353,7 @@ async fn staged_originals_are_not_compressed() {
 async fn over_limit_is_413_json() {
     let f = Fixture::new();
     // Refused on the declared length alone, before any handler runs.
-    let request = Request::post(format!("/api/ingest/items/{}/photos", f.item.id))
+    let request = Request::post(stage_uri(&f.item.id))
         .header(header::CONTENT_TYPE, multipart_type())
         .header(
             header::CONTENT_LENGTH,

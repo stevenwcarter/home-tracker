@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { batchCounts, kindOfPhoto, nextReviewable, suggestionToInput } from '../ingest';
+import {
+  batchCounts,
+  kindOfPhoto,
+  nextReviewable,
+  pinnedReviewable,
+  suggestionToInput,
+} from '../ingest';
 import { ingestBatch, ingestItem, ingestPhoto, ingestSuggestion } from 'test/ingestFixtures';
 import type { IngestItemStatus } from 'types/ingest';
 
@@ -123,6 +129,27 @@ describe('nextReviewable', () => {
       nextReviewable(ingestBatch({ id: 'b', items: items('ACCEPTED', 'SKIPPED') })),
     ).toBeNull();
     expect(nextReviewable(ingestBatch({ id: 'b' }))).toBeNull();
+  });
+});
+
+describe('pinnedReviewable', () => {
+  it('keeps the pinned item while it is ready or failed, even behind an earlier one', () => {
+    const batch = ingestBatch({ id: 'b', items: items('READY', 'FAILED', 'READY') });
+    expect(pinnedReviewable(batch, 'i1')?.id).toBe('i1');
+    expect(pinnedReviewable(batch, 'i2')?.id).toBe('i2');
+  });
+
+  it('falls back to the next reviewable once the pinned item leaves review', () => {
+    for (const status of ['ACCEPTED', 'SKIPPED', 'QUEUED'] as const) {
+      const batch = ingestBatch({ id: 'b', items: items('READY', status) });
+      expect(pinnedReviewable(batch, 'i1')?.id).toBe('i0');
+    }
+  });
+
+  it('falls back when nothing is pinned or the pinned item is gone', () => {
+    const batch = ingestBatch({ id: 'b', items: items('QUEUED', 'READY') });
+    expect(pinnedReviewable(batch, null)?.id).toBe('i1');
+    expect(pinnedReviewable(batch, 'missing')?.id).toBe('i1');
   });
 });
 

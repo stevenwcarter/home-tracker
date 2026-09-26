@@ -1,6 +1,10 @@
 //! `POST /api/upload/{entity_id}`: the multipart photo upload, its body limit,
 //! and the actor seam that refuses a read-only caller before the body is read.
 
+// Each test crate uses a different subset of the shared support.
+#[allow(dead_code)]
+mod support;
+
 use std::fs;
 use std::io::{Cursor, ErrorKind};
 use std::path::PathBuf;
@@ -11,25 +15,26 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use axum::Router;
-use axum::body::{self, Body};
+use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
-use axum::response::Response;
 use axum_test::multipart::{MultipartForm, Part};
 use axum_test::{TestResponse, TestServer};
 use home_tracker::api::upload::{MAX_UPLOAD_BYTES, MULTIPART_OVERHEAD_BYTES};
 use home_tracker::db::TestDb;
-use home_tracker::graphql::context::{Actor, Role};
+use home_tracker::graphql::context::Actor;
 use home_tracker::routes::{app, app_with_actor};
 use home_tracker::svc::fixtures::{SampleIds, jpeg, png_truncated_body, seed_sample};
 use serde_json::{Value, json};
+use support::upload::{
+    BOUNDARY, Untouchable, error_message, json_body, multipart_type, photo_form, read_only,
+    streamed_request,
+};
 use tempfile::TempDir;
 use tokio::io::{self, AsyncRead, AsyncReadExt, ReadBuf};
 use tokio::time;
-use tokio_util::io::ReaderStream;
 use tower::ServiceExt;
 
 const MIB: usize = 1024 * 1024;
-const BOUNDARY: &str = "home-tracker-test-boundary";
 
 /// A seeded database, an empty data dir, and a server over both.
 struct Fixture {
@@ -81,7 +86,7 @@ impl Fixture {
 
     async fn upload(&self, entity_id: &str, form: MultipartForm) -> TestResponse {
         self.server
-            .post(&format!("/api/upload/{entity_id}"))
+            .post(&upload_uri(entity_id))
             .multipart(form)
             .await
     }
@@ -111,25 +116,6 @@ impl Fixture {
             .unwrap()
             .clone()
     }
-}
-
-/// A form holding `bytes` as the `file` field, named `photo.jpg`.
-fn photo_form(bytes: Vec<u8>) -> MultipartForm {
-    MultipartForm::new().add_part(
-        "file",
-        Part::bytes(bytes)
-            .file_name("photo.jpg")
-            .mime_type("image/jpeg"),
-    )
-}
-
-/// The `{ "error": … }` message of a JSON error response.
-fn error_message(response: &TestResponse) -> String {
-    let body: Value = response.json();
-    body["error"]
-        .as_str()
-        .unwrap_or_else(|| panic!("expected a JSON error body: {body}"))
-        .to_owned()
 }
 
 fn primaries(attachments: &[Value]) -> Vec<&str> {
@@ -235,6 +221,11 @@ async fn rejects_html_as_415_and_stores_nothing() {
     assert!(f.attachments(&f.ids.screws).await.is_empty());
 }
 
+/// The upload route of entity `entity_id`.
+fn upload_uri(entity_id: &str) -> String {
+    format!("/api/upload/{entity_id}")
+}
+
 /// The opening of a multipart body: a `file` field's headers and a JPEG
 /// signature, followed by `len` bytes of padding and no closing boundary.
 fn file_part(len: u64) -> impl AsyncRead + Send + 'static {
@@ -247,42 +238,15 @@ fn file_part(len: u64) -> impl AsyncRead + Send + 'static {
     Cursor::new(head).chain(io::repeat(0).take(len))
 }
 
-/// An upload request whose body is `body`, streamed in 64 KiB chunks with no
-/// `Content-Length`.
-fn streamed_request(entity_id: &str, body: impl AsyncRead + Send + 'static) -> Request<Body> {
-    Request::post(format!("/api/upload/{entity_id}"))
-        .header(
-            header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        )
-        .body(Body::from_stream(ReaderStream::with_capacity(
-            body,
-            64 * 1024,
-        )))
-        .unwrap()
-}
-
 /// A complete upload of a JPEG header and `len` bytes of padding, streamed
 /// without `Content-Length`, so the limit trips mid-stream after the temp
 /// file exists.
 fn streamed_upload(entity_id: &str, len: u64) -> Request<Body> {
     let tail = format!("\r\n--{BOUNDARY}--\r\n").into_bytes();
-    streamed_request(entity_id, file_part(len).chain(Cursor::new(tail)))
-}
-
-/// A body that records being polled and never yields: a handler that reads
-/// it hangs, and the flag says it tried.
-struct Untouchable(Arc<AtomicBool>);
-
-impl AsyncRead for Untouchable {
-    fn poll_read(
-        self: Pin<&mut Self>,
-        _: &mut Context<'_>,
-        _: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        self.0.store(true, Ordering::SeqCst);
-        Poll::Pending
-    }
+    streamed_request(
+        &upload_uri(entity_id),
+        file_part(len).chain(Cursor::new(tail)),
+    )
 }
 
 /// A client that goes away: every read fails.
@@ -299,20 +263,6 @@ impl AsyncRead for Disconnected {
             "client went away",
         )))
     }
-}
-
-fn read_only() -> Actor {
-    Actor::User {
-        id: "u1".to_owned(),
-        role: Role::ReadOnly,
-    }
-}
-
-async fn json_body(response: Response) -> Value {
-    let bytes = body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("not JSON ({err}): {bytes:?}"))
 }
 
 #[tokio::test]
@@ -335,11 +285,8 @@ async fn over_limit_is_413_json_with_no_temp_left() {
 async fn declared_over_limit_length_is_413_json() {
     let f = Fixture::new();
     // The limit layer refuses on the header alone, before any handler runs.
-    let request = Request::post(format!("/api/upload/{}", f.ids.screws))
-        .header(
-            header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        )
+    let request = Request::post(upload_uri(&f.ids.screws))
+        .header(header::CONTENT_TYPE, multipart_type())
         .header(header::CONTENT_LENGTH, 26 * MIB)
         .body(Body::empty())
         .unwrap();
@@ -383,11 +330,8 @@ async fn a_file_one_byte_over_the_limit_is_413_and_stores_nothing() {
 #[tokio::test]
 async fn a_body_one_byte_over_the_limit_and_its_overhead_is_413() {
     let f = Fixture::new();
-    let request = Request::post(format!("/api/upload/{}", f.ids.screws))
-        .header(
-            header::CONTENT_TYPE,
-            format!("multipart/form-data; boundary={BOUNDARY}"),
-        )
+    let request = Request::post(upload_uri(&f.ids.screws))
+        .header(header::CONTENT_TYPE, multipart_type())
         .header(
             header::CONTENT_LENGTH,
             MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES + 1,
@@ -420,7 +364,7 @@ async fn read_only_actor_is_403_before_the_body_is_read() {
     let f = Fixture::with_actor(read_only());
     let polled = Arc::new(AtomicBool::new(false));
     let router = app_with_actor(f.db.pool.clone(), f.data.path().to_path_buf(), read_only());
-    let request = streamed_request(&f.ids.screws, Untouchable(Arc::clone(&polled)));
+    let request = streamed_request(&upload_uri(&f.ids.screws), Untouchable(Arc::clone(&polled)));
 
     let response = time::timeout(Duration::from_secs(2), router.oneshot(request))
         .await
@@ -440,7 +384,7 @@ async fn client_abort_mid_file_leaves_nothing() {
     // Most of the limit, so the writer still has work queued when the
     // client goes away and a writer left running would be seen.
     let request = streamed_request(
-        &f.ids.screws,
+        &upload_uri(&f.ids.screws),
         file_part(20 * MIB as u64).chain(Disconnected),
     );
 
@@ -511,7 +455,7 @@ async fn non_multipart_body_is_400_json() {
 
     let response = f
         .server
-        .post(&format!("/api/upload/{}", f.ids.screws))
+        .post(&upload_uri(&f.ids.screws))
         .json(&json!({ "file": "nope" }))
         .await;
 
@@ -532,10 +476,7 @@ async fn unknown_entity_is_404() {
 
 #[tokio::test]
 async fn graphql_handler_reads_the_actor_extension() {
-    let f = Fixture::with_actor(Actor::User {
-        id: "u1".to_owned(),
-        role: Role::ReadOnly,
-    });
+    let f = Fixture::with_actor(read_only());
 
     let body = f
         .graphql(

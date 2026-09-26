@@ -8,6 +8,7 @@ import { GET_TAGS } from 'hooks/queries';
 import { MemoryRouter } from 'react-router-dom';
 import userEvent from '@testing-library/user-event';
 import { IngestReview } from '../IngestReview';
+import { useReviewedItem } from '../useReviewedItem';
 import {
   ENTITY_TYPES,
   entityTypeWire,
@@ -82,6 +83,11 @@ const TagsRefetcher = () => {
   );
 };
 
+/** The review as the page wires it: the item under review picked by the hook. */
+const Reviewed = ({ batch: value }: { batch: IngestBatch }) => (
+  <IngestReview batch={value} item={useReviewedItem(value)} />
+);
+
 /** Rendered with a wrapper, so `rerender` can hand it a changed batch. */
 const renderReview = (
   value: IngestBatch = batch(),
@@ -95,7 +101,7 @@ const renderReview = (
       </MemoryRouter>
     </MockedProvider>
   );
-  return render(<IngestReview batch={value} />, { wrapper });
+  return render(<Reviewed batch={value} />, { wrapper });
 };
 
 /** The form, once the type, tag and location lookups have landed. */
@@ -236,9 +242,49 @@ describe('IngestReview', () => {
     });
     const saved = { ...DRILL, status: 'ACCEPTED' as const, photos: [] };
     rerender(
-      <IngestReview batch={batch([ingestItem({ id: 'i1', status: 'ACCEPTED' }), saved, next])} />,
+      <Reviewed batch={batch([ingestItem({ id: 'i1', status: 'ACCEPTED' }), saved, next])} />,
     );
     expect(await screen.findByRole('heading', { name: 'Item 3' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Name')).toHaveValue('Hammer');
+  });
+
+  // Another item turning ready (or a retried one coming back) must not pull
+  // the pane away from the item being edited.
+  it('stays on the item under review when an earlier one becomes ready', async () => {
+    const user = userEvent.setup();
+    const earlier = (status: 'QUEUED' | 'READY') =>
+      ingestItem({
+        id: 'i1',
+        status,
+        suggestion: ingestSuggestion({ name: 'Hammer' }),
+        photos: [ingestPhoto({ id: 'h1' })],
+      });
+    const { rerender } = renderReview(batch([earlier('QUEUED'), DRILL]));
+    await form();
+    await user.clear(screen.getByLabelText('Name'));
+    await user.type(screen.getByLabelText('Name'), 'My drill');
+
+    rerender(<Reviewed batch={batch([earlier('READY'), DRILL])} />);
+
+    expect(screen.getByRole('heading', { name: 'Item 2' })).toBeInTheDocument();
+    expect(screen.getByLabelText('Name')).toHaveValue('My drill');
+  });
+
+  it('moves on once the item under review is accepted', async () => {
+    const hammer = ingestItem({
+      id: 'i1',
+      status: 'READY',
+      suggestion: ingestSuggestion({ name: 'Hammer' }),
+      photos: [ingestPhoto({ id: 'h1' })],
+    });
+    const { rerender } = renderReview(batch([{ ...hammer, status: 'QUEUED' }, DRILL]));
+    await form();
+    rerender(<Reviewed batch={batch([hammer, DRILL])} />);
+    expect(screen.getByRole('heading', { name: 'Item 2' })).toBeInTheDocument();
+
+    rerender(<Reviewed batch={batch([hammer, { ...DRILL, status: 'ACCEPTED', photos: [] }])} />);
+
+    expect(await screen.findByRole('heading', { name: 'Item 1' })).toBeInTheDocument();
     expect(screen.getByLabelText('Name')).toHaveValue('Hammer');
   });
 

@@ -3,10 +3,9 @@
 mod support;
 
 use std::fs;
-use std::io;
 use std::os::unix::fs as unix_fs;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::thread;
 
 use axum_test::{TestResponse, TestServer};
@@ -23,9 +22,9 @@ use home_tracker::svc::thumbnail::{ThumbSize, allowed_size};
 use home_tracker::svc::thumbnail_service::ThumbnailService;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use support::logs::Logs;
 use tempfile::TempDir;
 use tokio::task::JoinSet;
-use tracing::subscriber::{self, DefaultGuard};
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
 
@@ -447,39 +446,6 @@ async fn generation_is_bounded_by_the_semaphore() {
     let response = f.server.get("/attachments/att-1/thumb/300").await;
     response.assert_status_ok();
     assert_eq!(f.thumbs.generations(), 1);
-}
-
-/// Formatted log lines emitted on this thread while the capture's guard
-/// lives. `#[tokio::test]` runs every task on the test's thread, so the
-/// handlers' events land here.
-#[derive(Clone, Default)]
-struct Logs(Arc<Mutex<Vec<u8>>>);
-
-impl Logs {
-    fn capture() -> (Self, DefaultGuard) {
-        let logs = Self::default();
-        let writer = logs.clone();
-        let collector = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_writer(move || writer.clone())
-            .finish();
-        (logs, subscriber::set_default(collector))
-    }
-
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
-    }
-}
-
-impl io::Write for Logs {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0.lock().unwrap().extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
 }
 
 #[tokio::test]

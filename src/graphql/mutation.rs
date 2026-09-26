@@ -235,15 +235,15 @@ impl Mutation {
         review_step(ctx, &id, |c| svc::ingest::skip(c, &ctx.data_dir, &id))
     }
 
-    /// Deletes batch `id` with everything staged in it, and ends its
-    /// progress streams.
+    /// Deletes batch `id` with everything staged in it; its progress streams
+    /// get a last batch event, then end.
     fn delete_ingest_batch(ctx: &GraphQLContext, id: ID) -> FieldResult<bool> {
         ctx.require_write()?;
         refusable(
             ctx.conn()
                 .and_then(|mut c| svc::ingest::delete_batch(&mut c, &ctx.data_dir, &id)),
         )?;
-        ctx.ingest.events().close(&id);
+        ctx.ingest.events().removed(&id);
         Ok(true)
     }
 }

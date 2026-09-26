@@ -229,8 +229,8 @@ An environment key is never written to the database.
 here is stored in plaintext in the `settings` table, so the database file
 and every backup of it carry the key.
 
-Each model call has a 60 s timeout (10 s to connect) and is retried on 429
-and 5xx after 1 s and then 4 s. A provider that refuses
+The model may take up to two minutes per call (10 s to connect), and a
+call is retried on 429 and 5xx after 1 s and then 4 s. A provider that refuses
 `response_format: json_schema` is asked once more with `json_object`, and
 one that refuses `max_completion_tokens` once more with `max_tokens`. Each
 call logs its model, status, latency and token counts at `info`; an error

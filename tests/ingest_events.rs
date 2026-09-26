@@ -357,6 +357,8 @@ async fn deleting_a_batch_ends_its_stream() {
     )
     .await;
 
+    // A batch event first, so a viewer refetches and finds the batch gone.
+    assert_eq!(stream.next().await, Some(event("batch", &batch.id)));
     assert_eq!(stream.next().await, None);
 }
 
@@ -379,5 +381,6 @@ async fn cleanup_ends_the_streams_of_the_batches_it_deletes() {
 
     assert_eq!(runner.cleanup_stale().await.unwrap(), 1);
 
+    assert_eq!(stream.next().await, Some(event("batch", &batch.id)));
     assert_eq!(stream.next().await, None);
 }

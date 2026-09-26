@@ -69,9 +69,25 @@ const ATTACHMENT_KIND: Readonly<Record<SuggestedKind, AttachmentKind>> = {
 export const kindOfPhoto = (photo: Pick<IngestPhoto, 'suggestedKind'>): AttachmentKind =>
   photo.suggestedKind ? ATTACHMENT_KIND[photo.suggestedKind] : 'PHOTO';
 
+const isReviewable = (item: IngestItem): boolean =>
+  item.status === 'READY' || item.status === 'FAILED';
+
 /** The item to review next: the first, in batch order, that is `READY` or `FAILED`. */
 export const nextReviewable = (batch: Pick<IngestBatch, 'items'>): IngestItem | null =>
-  batch.items.find((item) => item.status === 'READY' || item.status === 'FAILED') ?? null;
+  batch.items.find(isReviewable) ?? null;
+
+/**
+ * The item to keep reviewing: item `pinnedId` while it is still `READY` or
+ * `FAILED`, else (it was accepted, skipped or queued, or is gone) the next
+ * reviewable one.
+ */
+export const pinnedReviewable = (
+  batch: Pick<IngestBatch, 'items'>,
+  pinnedId: string | null,
+): IngestItem | null => {
+  const pinned = batch.items.find((item) => item.id === pinnedId);
+  return pinned && isReviewable(pinned) ? pinned : nextReviewable(batch);
+};
 
 /** How many items stand where; `pending` is every item not yet analysed. */
 export interface BatchCounts {
