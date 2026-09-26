@@ -271,6 +271,7 @@ type Entity {
   entityType: EntityType!
   isLocation: Boolean!            # convenience: entityType.isLocation
   parent: Entity
+  parentId: ID                    # parent's id, without loading the parent entity
   ancestors: [Entity!]!           # root first, for breadcrumbs
   childLocations: [Entity!]!      # direct children whose type is a location
   items: [Entity!]!               # direct children whose type is not a location
@@ -300,12 +301,10 @@ enum AttachmentKind { PHOTO MANUAL WARRANTY ATTACHMENT RECEIPT }
 type EntityField { id: ID!  name: String!  kind: FieldKind!  textValue: String  numberValue: Int  booleanValue: Boolean!  timeValue: DateTime }
 enum FieldKind { TEXT NUMBER BOOLEAN TIME }
 
-type LocationNode { entity: Entity!  children: [LocationNode!]! }
-
 type Query {
   summary: Summary!
   entityTypes: [EntityType!]!
-  locationTree: [LocationNode!]!          # roots = location entities with no parent, whole tree, sorted by name
+  locations: [Entity!]!                   # every location entity, flat, sorted by name
   entity(id: ID!): Entity
   rootItems: [Entity!]!                   # non-location entities with no parent (homeless items)
   tags: [Tag!]!
@@ -341,11 +340,6 @@ type Mutation {
 
 `DateTime` and `LocalDate` are juniper's chrono scalars. Phase 1 ships only `Summary`
 and `Query.summary` (dummy data); later phases add the rest.
-
-Phase 3 adds `Entity.parentId` and a flat `locations: [Entity!]!` query to
-`Query`, because a GraphQL selection cannot recurse and so can only read
-`locationTree` to a fixed depth. The client then builds the tree from that flat
-list and `locationTree` is retired.
 
 Validation rules enforced in `svc`, tested at the GraphQL seam:
 

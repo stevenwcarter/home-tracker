@@ -8,3 +8,4 @@ pub mod fixtures;
 pub mod settings;
 pub mod stats;
 pub mod tag;
+pub mod thumbnail;

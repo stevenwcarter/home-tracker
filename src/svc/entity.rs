@@ -1,26 +1,17 @@
 //! Entities: locations and items, their hierarchy, and search.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use anyhow::{Context, Result};
 use diesel::dsl::sql;
 use diesel::prelude::*;
 use diesel::sql_types::Text;
 
-use crate::graphql::context::GraphQLContext;
 use crate::models::Entity;
 use crate::schema::{entities, entity_types};
 
 /// Upper bound on parent hops, so damaged data can never loop forever.
 const MAX_DEPTH: usize = 64;
-
-/// A location with its nested sub-locations (items are not part of the tree).
-#[derive(Debug, Clone, PartialEq, juniper::GraphQLObject)]
-#[graphql(context = GraphQLContext)]
-pub struct LocationNode {
-    pub entity: Entity,
-    pub children: Vec<LocationNode>,
-}
 
 /// The entity with `id`, if any.
 pub fn get(conn: &mut SqliteConnection, id: &str) -> Result<Option<Entity>> {
@@ -108,73 +99,16 @@ pub fn ancestors(conn: &mut SqliteConnection, id: &str) -> Result<Vec<Entity>> {
     Ok(chain)
 }
 
-/// Every location arranged by parent. Archived locations are included; a
-/// location whose parent is missing or is not a location becomes a root.
-pub fn location_tree(conn: &mut SqliteConnection) -> Result<Vec<LocationNode>> {
-    let locations: Vec<Entity> = entities::table
+/// Every location, flat and sorted by name. Archived locations are included;
+/// the client nests them into a tree itself using `parentId`.
+pub fn locations(conn: &mut SqliteConnection) -> Result<Vec<Entity>> {
+    entities::table
         .inner_join(entity_types::table)
         .filter(entity_types::is_location.eq(true))
         .order(sql::<Text>("lower(entities.name)"))
         .select(Entity::as_select())
         .load(conn)
-        .context("loading locations")?;
-    let location_ids: HashSet<String> = locations.iter().map(|e| e.id.clone()).collect();
-    let mut by_parent: HashMap<Option<String>, Vec<Entity>> = HashMap::new();
-    for location in locations {
-        let parent = location
-            .parent_id
-            .clone()
-            .filter(|p| location_ids.contains(p));
-        by_parent.entry(parent).or_default().push(location);
-    }
-    let mut roots = take_subtree(&mut by_parent, None);
-    // Whatever is left sits on (or under) a parent cycle and has no root to be
-    // reached from. Promote the lowest-named leftover until nothing is hidden.
-    while let Some(entity) = take_lowest(&mut by_parent) {
-        let children = take_subtree(&mut by_parent, Some(entity.id.clone()));
-        roots.push(LocationNode { entity, children });
-    }
-    roots.sort_by_cached_key(|node| node.entity.name.to_lowercase());
-    Ok(roots)
-}
-
-/// Removes the remaining location with the lowest case-insensitive name (ties
-/// broken by id, so the choice does not depend on `HashMap` order).
-fn take_lowest(by_parent: &mut HashMap<Option<String>, Vec<Entity>>) -> Option<Entity> {
-    let (parent, index) = by_parent
-        .iter()
-        .flat_map(|(parent, siblings)| {
-            siblings
-                .iter()
-                .enumerate()
-                .map(move |(index, entity)| (parent, index, entity))
-        })
-        .min_by_key(|(_, _, entity)| (entity.name.to_lowercase(), &entity.id))
-        .map(|(parent, index, _)| (parent.clone(), index))?;
-    let siblings = by_parent.get_mut(&parent)?;
-    let entity = siblings.remove(index);
-    if siblings.is_empty() {
-        by_parent.remove(&parent);
-    }
-    Some(entity)
-}
-
-/// Removes and nests the children of `parent`. Removing each list as it is
-/// consumed doubles as the visited set: a cycle finds its list already gone,
-/// so every location appears at most once and recursion always ends.
-fn take_subtree(
-    by_parent: &mut HashMap<Option<String>, Vec<Entity>>,
-    parent: Option<String>,
-) -> Vec<LocationNode> {
-    by_parent
-        .remove(&parent)
-        .unwrap_or_default()
-        .into_iter()
-        .map(|entity| {
-            let children = take_subtree(by_parent, Some(entity.id.clone()));
-            LocationNode { entity, children }
-        })
-        .collect()
+        .context("loading locations")
 }
 
 /// Entities whose name contains `query` (case-insensitive, `%`/`_` literal),
@@ -222,10 +156,6 @@ mod tests {
             .values(rows)
             .execute(conn)
             .unwrap();
-    }
-
-    fn node_names(nodes: &[LocationNode]) -> Vec<&str> {
-        nodes.iter().map(|n| n.entity.name.as_str()).collect()
     }
 
     #[test]
@@ -301,61 +231,16 @@ mod tests {
     }
 
     #[test]
-    fn location_tree_nests_locations_only() {
+    fn locations_lists_every_location_type_entity_sorted() {
         let db = TestDb::new();
         let mut conn = db.pool.get().unwrap();
         seed_sample(&mut conn);
-        let tree = location_tree(&mut conn).unwrap();
-        assert_eq!(node_names(&tree), ["Attic", "House"]);
-        assert!(tree[0].entity.archived);
-        assert!(tree[0].children.is_empty());
-        let house = &tree[1];
-        assert_eq!(node_names(&house.children), ["Garage"]);
-        let garage = &house.children[0];
-        assert_eq!(node_names(&garage.children), ["Tote A"]);
-        assert!(garage.children[0].children.is_empty());
-    }
-
-    #[test]
-    fn location_tree_treats_an_orphaned_location_as_a_root() {
-        let db = TestDb::new();
-        let mut conn = db.pool.get().unwrap();
-        seed_sample(&mut conn);
-        diesel::sql_query("PRAGMA foreign_keys = OFF")
-            .execute(&mut conn)
-            .unwrap();
-        diesel::sql_query("UPDATE entities SET parent_id = 'e-gone' WHERE id = 'e-garage'")
-            .execute(&mut conn)
-            .unwrap();
-        diesel::sql_query("PRAGMA foreign_keys = ON")
-            .execute(&mut conn)
-            .unwrap();
-        let tree = location_tree(&mut conn).unwrap();
-        assert_eq!(node_names(&tree), ["Attic", "Garage", "House"]);
-        assert_eq!(node_names(&tree[1].children), ["Tote A"]);
-        assert!(tree[2].children.is_empty());
-    }
-
-    #[test]
-    fn location_tree_surfaces_a_parent_cycle_as_roots() {
-        // A cycle has no root to walk down from; it must still be navigable.
-        let db = TestDb::new();
-        let mut conn = db.pool.get().unwrap();
-        seed_sample(&mut conn);
-        diesel::sql_query("UPDATE entities SET parent_id = 'e-tote-a' WHERE id = 'e-house'")
-            .execute(&mut conn)
-            .unwrap();
-        fn flatten<'a>(nodes: &'a [LocationNode], out: &mut Vec<&'a str>) {
-            for node in nodes {
-                out.push(&node.entity.id);
-                flatten(&node.children, out);
-            }
-        }
-        let tree = location_tree(&mut conn).unwrap();
-        let mut ids = Vec::new();
-        flatten(&tree, &mut ids);
-        ids.sort_unstable();
-        assert_eq!(ids, ["e-attic", "e-garage", "e-house", "e-tote-a"]);
+        // Archived (Attic) and non-`Location`-typed (Tote A) locations are
+        // still locations; the flat list has no notion of a tree to nest into.
+        assert_eq!(
+            names(&locations(&mut conn).unwrap()),
+            ["Attic", "Garage", "House", "Tote A"]
+        );
     }
 
     #[test]

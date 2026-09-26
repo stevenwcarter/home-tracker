@@ -2,8 +2,7 @@
 //!
 //! Each file implements `juniper::graphql_object` directly on a
 //! `crate::models` row, so resolvers read fields without a copy and fetch
-//! relationships lazily through `svc`. `LocationNode` derives its object on
-//! `svc::entity::LocationNode` itself.
+//! relationships lazily through `svc`.
 
 mod attachment;
 mod entity;

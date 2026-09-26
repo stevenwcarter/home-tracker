@@ -36,6 +36,12 @@ impl Entity {
             Some(pid) => gql(ctx.conn().and_then(|mut c| svc::entity::get(&mut c, pid))),
         }
     }
+    /// The parent's id, or null at the top of the hierarchy. Lets the client
+    /// nest the flat `locations` query into a tree without a round trip per
+    /// level (unlike `parent`, which loads the whole parent entity).
+    fn parent_id(&self) -> Option<ID> {
+        self.parent_id.as_deref().map(ID::new)
+    }
     /// Root first, for breadcrumbs.
     fn ancestors(&self, ctx: &GraphQLContext) -> FieldResult<Vec<Entity>> {
         gql(ctx

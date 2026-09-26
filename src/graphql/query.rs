@@ -4,7 +4,6 @@ use super::context::GraphQLContext;
 use super::schema::graphql_translate_anyhow as gql;
 use crate::models::{Entity, EntityType, Tag};
 use crate::svc;
-use crate::svc::entity::LocationNode;
 use crate::svc::stats::Summary;
 
 /// `search` returns this many rows when the caller gives no limit.
@@ -28,11 +27,13 @@ impl Query {
             .and_then(|mut c| svc::entity_type::list(&mut c)))
     }
 
-    /// Parentless locations and all their sub-locations, sorted by name.
-    fn location_tree(context: &GraphQLContext) -> FieldResult<Vec<LocationNode>> {
+    /// Every location, flat and sorted by name; the client nests them into a
+    /// tree using `parentId` (a GraphQL selection cannot recurse, so a fixed-
+    /// depth tree query cannot serve arbitrarily deep locations).
+    fn locations(context: &GraphQLContext) -> FieldResult<Vec<Entity>> {
         gql(context
             .conn()
-            .and_then(|mut c| svc::entity::location_tree(&mut c)))
+            .and_then(|mut c| svc::entity::locations(&mut c)))
     }
 
     /// One entity, or null when `id` matches none.

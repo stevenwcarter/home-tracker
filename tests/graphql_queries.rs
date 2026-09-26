@@ -3,7 +3,7 @@ use chrono::DateTime;
 use diesel::prelude::*;
 use home_tracker::db::{ITEM_TYPE_ID, TestDb};
 use home_tracker::routes::app;
-use home_tracker::schema::entities;
+use home_tracker::schema::{attachments, entities};
 use home_tracker::svc::fixtures::{self, SampleIds, seed_sample};
 use serde_json::{Value, json};
 
@@ -56,27 +56,28 @@ async fn entity_types_lists_all_with_counts() {
 }
 
 #[tokio::test]
-async fn location_tree_nests_locations() {
-    let (server, _ids, _db) = seeded().await;
+async fn locations_is_flat_with_parent_ids() {
+    let (server, ids, _db) = seeded().await;
 
     let data = query(
         &server,
-        "{ locationTree { entity { name } children { entity { name } children { entity { name } } } } }",
+        "{ locations { id name parentId isLocation } }",
         json!({}),
     )
     .await;
 
-    let roots = &data["locationTree"];
-    let root_names: Vec<&str> = roots
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|n| n["entity"]["name"].as_str().unwrap())
-        .collect();
-    assert_eq!(root_names, ["Attic", "House"]);
-    let garage = &roots[1]["children"][0];
-    assert_eq!(garage["entity"]["name"], "Garage");
-    assert_eq!(garage["children"][0]["entity"]["name"], "Tote A");
+    let rows = data["locations"].as_array().unwrap();
+    assert_eq!(
+        names(&data["locations"]),
+        ["Attic", "Garage", "House", "Tote A"]
+    );
+    assert!(
+        rows.iter().all(|r| r["isLocation"] == true),
+        "not every row is a location: {rows:?}"
+    );
+    let by_name = |name: &str| rows.iter().find(|r| r["name"] == name).unwrap();
+    assert_eq!(by_name("Garage")["parentId"], ids.house);
+    assert_eq!(by_name("House")["parentId"], Value::Null);
 }
 
 #[tokio::test]
@@ -129,10 +130,13 @@ async fn entity_returns_every_scalar_and_relationship() {
     assert_eq!(attachments[1]["mimeType"], "application/pdf");
     assert_eq!(attachments[1]["thumbnailUrl"], Value::Null);
 
-    assert_eq!(drill["primaryPhoto"]["url"], "/attachments/a-drill-photo");
+    assert_eq!(
+        drill["primaryPhoto"]["url"],
+        "/attachments/a-drill-photo?v=aaaaaaaaaaaa"
+    );
     assert_eq!(
         drill["primaryPhoto"]["thumbnailUrl"],
-        "/attachments/a-drill-photo/thumb/500"
+        "/attachments/a-drill-photo/thumb/500?v=aaaaaaaaaaaa"
     );
 
     assert_eq!(drill["fields"][0]["name"], "Voltage");
@@ -245,20 +249,51 @@ async fn search_limit_is_clamped() {
 }
 
 #[tokio::test]
-async fn thumbnail_url_rounds_nothing_server_side_yet() {
+async fn attachment_urls_carry_a_version_tag() {
     let (server, ids, _db) = seeded().await;
 
     let data = query(
         &server,
-        "query($id: ID!) { entity(id: $id) { primaryPhoto { thumbnailUrl(size: 300) } } }",
+        "query($id: ID!) { entity(id: $id) { primaryPhoto { url thumbnailUrl(size: 300) } } }",
         json!({ "id": ids.drill }),
     )
     .await;
 
+    // The fixture's photo sha256 is "aa"×32; the version tag is its first 12 chars.
+    let photo = &data["entity"]["primaryPhoto"];
+    assert_eq!(photo["url"], "/attachments/a-drill-photo?v=aaaaaaaaaaaa");
     assert_eq!(
-        data["entity"]["primaryPhoto"]["thumbnailUrl"],
-        "/attachments/a-drill-photo/thumb/300"
+        photo["thumbnailUrl"],
+        "/attachments/a-drill-photo/thumb/300?v=aaaaaaaaaaaa"
     );
+}
+
+#[tokio::test]
+async fn thumbnail_url_is_null_for_non_images_and_case_insensitive() {
+    let (server, ids, db) = seeded().await;
+    {
+        let mut conn = db.pool.get().unwrap();
+        diesel::update(attachments::table.find(&ids.manual))
+            .set(attachments::mime_type.eq("application/PDF"))
+            .execute(&mut conn)
+            .unwrap();
+        diesel::update(attachments::table.find(&ids.photo))
+            .set(attachments::mime_type.eq("image/JPEG"))
+            .execute(&mut conn)
+            .unwrap();
+    }
+
+    let data = query(
+        &server,
+        "query($id: ID!) { entity(id: $id) { attachments { id thumbnailUrl } } }",
+        json!({ "id": ids.drill }),
+    )
+    .await;
+
+    let rows = data["entity"]["attachments"].as_array().unwrap();
+    let by_id = |id: &str| rows.iter().find(|r| r["id"] == id).unwrap();
+    assert_eq!(by_id(&ids.manual)["thumbnailUrl"], Value::Null);
+    assert!(by_id(&ids.photo)["thumbnailUrl"].is_string());
 }
 
 #[tokio::test]
@@ -299,6 +334,17 @@ async fn argument_types_and_defaults_match_the_spec() {
     let id = arg("query", "entity", "id");
     assert_eq!(id["type"]["ofType"]["name"], "ID");
 
+    // `locationTree`/`LocationNode` are retired in favour of a flat `locations`
+    // query the client nests itself via `Entity.parentId`.
+    let query_fields: Vec<&str> = data["query"]["fields"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["name"].as_str().unwrap())
+        .collect();
+    assert!(query_fields.contains(&"locations"), "{query_fields:?}");
+    assert!(!query_fields.contains(&"locationTree"), "{query_fields:?}");
+
     let entity_fields = data["entity"]["fields"].as_array().unwrap();
     let field_type = |name: &str| {
         let f = entity_fields.iter().find(|f| f["name"] == name).unwrap();
@@ -308,4 +354,10 @@ async fn argument_types_and_defaults_match_the_spec() {
     assert_eq!(field_type("createdAt")["ofType"]["name"], "DateTime");
     assert_eq!(field_type("quantity")["ofType"]["name"], "Float");
     assert_eq!(field_type("id")["ofType"]["name"], "ID");
+    assert_eq!(
+        field_type("parentId")["kind"],
+        "SCALAR",
+        "parentId is nullable"
+    );
+    assert_eq!(field_type("parentId")["name"], "ID");
 }

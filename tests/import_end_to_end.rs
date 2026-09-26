@@ -34,7 +34,7 @@ async fn an_imported_backup_reads_back_through_graphql() {
         .json(&json!({
             "query": "query($id: ID!) {
                 summary { totalValueCents currency totalItems totalLocations totalTags }
-                locationTree { entity { name isLocation } children { entity { name } } }
+                locations { name parentId }
                 entity(id: $id) {
                     assetId purchasePriceCents purchaseDate insured
                     entityType { name } parent { name } tags { name }
@@ -61,13 +61,11 @@ async fn an_imported_backup_reads_back_through_graphql() {
             "totalTags": 2,
         })
     );
-    assert_eq!(
-        data["locationTree"],
-        json!([{
-            "entity": { "name": "Garage", "isLocation": true },
-            "children": [{ "entity": { "name": "Tote 1" } }],
-        }])
-    );
+    // A flat list, not a tree: the client nests it itself via `parentId`.
+    let locations = data["locations"].as_array().unwrap();
+    let by_name = |name: &str| locations.iter().find(|l| l["name"] == name).unwrap();
+    assert_eq!(by_name("Garage")["parentId"], Value::Null);
+    assert_eq!(by_name("Tote 1")["parentId"], ids.garage);
 
     let router = &data["entity"];
     assert_eq!(router["assetId"], "000-007");
@@ -82,7 +80,13 @@ async fn an_imported_backup_reads_back_through_graphql() {
         json!([{ "name": "Model", "textValue": "AX1800" }])
     );
     let photo = &router["primaryPhoto"];
-    assert_eq!(photo["url"], format!("/attachments/{}", ids.photo));
-    let thumbnail_url = photo["thumbnailUrl"].as_str().unwrap();
-    assert!(thumbnail_url.ends_with("/thumb/500"), "{thumbnail_url}");
+    let version = &ids.jpeg_sha256[..12];
+    assert_eq!(
+        photo["url"],
+        format!("/attachments/{}?v={version}", ids.photo)
+    );
+    assert_eq!(
+        photo["thumbnailUrl"],
+        format!("/attachments/{}/thumb/500?v={version}", ids.photo)
+    );
 }
