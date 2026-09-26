@@ -15,6 +15,7 @@ use home_tracker::routes::app_with_thumbnails;
 use home_tracker::schema::{attachments, thumbnails};
 use home_tracker::svc::fixtures::{self, SampleIds, seed_sample};
 use home_tracker::svc::thumbnail_service::ThumbnailService;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use tokio::task::JoinSet;
@@ -22,6 +23,14 @@ use tokio::task::JoinSet;
 use support::images;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+
+/// Attachments are user-supplied bytes served from the app origin: the browser
+/// must not sniff them into something executable, and an HTML or SVG original
+/// opened directly must not run script with the app's origin.
+fn assert_hardened(response: &TestResponse) {
+    assert_eq!(header(response, "x-content-type-options"), "nosniff");
+    assert_eq!(header(response, "content-security-policy"), "sandbox");
+}
 
 /// A seeded database, a data dir, and a server whose thumbnail service the
 /// test can inspect. Keeps the temp dirs alive for the test's duration.
@@ -118,6 +127,7 @@ async fn serves_the_original_with_headers() {
     );
     assert_eq!(header(&response, "cache-control"), IMMUTABLE);
     assert_eq!(header(&response, "etag"), format!("\"{sha}\""));
+    assert_hardened(&response);
 }
 
 #[tokio::test]
@@ -216,6 +226,7 @@ async fn thumb_rounds_up_and_clamps() {
         assert_eq!(header(&response, "cache-control"), IMMUTABLE);
         assert_eq!(header(&response, "etag"), format!("\"{sha}-{served}\""));
         assert_eq!(dimensions(&response), dims, "requested {requested}");
+        assert_hardened(&response);
     }
     assert_eq!(f.thumb_sizes("att-1"), [300, 500, 1200]);
     assert_eq!(f.thumbs.generations(), 3);
@@ -340,5 +351,48 @@ async fn imported_homebox_thumbnail_is_served_without_generation() {
     assert_eq!(response.as_bytes().as_ref(), stored.as_slice());
     assert_eq!(header(&response, "content-type"), "image/webp");
     assert_eq!(header(&response, "etag"), format!("\"{sha}-500\""));
+    assert_hardened(&response);
     assert_eq!(f.thumbs.generations(), 0);
+}
+
+#[tokio::test]
+async fn graphql_urls_resolve_on_the_http_routes() {
+    // The seam between the GraphQL URL formatting and the HTTP routes: the
+    // strings the SPA is handed must be fetchable verbatim, `?v=` and all.
+    let f = Fixture::new();
+    let bytes = images::jpeg(1600, 1200);
+    f.add_file("att-real", "photo.jpg", "image/jpeg", &bytes);
+    diesel::update(attachments::table.filter(attachments::entity_id.eq(&f.ids.drill)))
+        .set(attachments::is_primary.eq(attachments::id.eq("att-real")))
+        .execute(&mut f.db.pool.get().unwrap())
+        .unwrap();
+
+    let response = f
+        .server
+        .post("/graphql")
+        .json(&json!({
+            "query": "query($id: ID!) { entity(id: $id) { primaryPhoto { url thumbnailUrl(size: 300) } } }",
+            "variables": { "id": f.ids.drill },
+        }))
+        .await;
+    response.assert_status_ok();
+    let body: Value = response.json();
+    assert!(body.get("errors").is_none(), "unexpected errors: {body}");
+    let photo = &body["data"]["entity"]["primaryPhoto"];
+    let url = photo["url"].as_str().unwrap();
+    let thumbnail_url = photo["thumbnailUrl"].as_str().unwrap();
+    assert!(url.starts_with("/attachments/att-real?v="), "{url}");
+    assert!(
+        thumbnail_url.starts_with("/attachments/att-real/thumb/300?v="),
+        "{thumbnail_url}"
+    );
+
+    let original = f.server.get(url).await;
+    original.assert_status_ok();
+    assert_eq!(original.as_bytes().as_ref(), bytes.as_slice());
+
+    let thumb = f.server.get(thumbnail_url).await;
+    thumb.assert_status_ok();
+    assert_eq!(header(&thumb, "content-type"), "image/webp");
+    assert_eq!(dimensions(&thumb), (300, 225));
 }

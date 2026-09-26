@@ -3,6 +3,12 @@
 //!
 //! Both are immutably cacheable: the SPA's URLs carry a version (`?v=`), and
 //! an original's bytes are addressed by their sha256, which is also the ETag.
+//!
+//! Both are also hardened: the bytes are user-supplied but served from the
+//! app's origin, so `X-Content-Type-Options: nosniff` stops the browser
+//! guessing a more dangerous type, and `Content-Security-Policy: sandbox`
+//! makes an HTML or SVG original opened directly a sandboxed document that
+//! cannot run script on the app origin.
 
 use std::fmt::Write as _;
 use std::io::ErrorKind;
@@ -40,6 +46,8 @@ pub fn attachment_routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) ->
 
 const OCTET_STREAM: HeaderValue = HeaderValue::from_static("application/octet-stream");
 const INLINE: HeaderValue = HeaderValue::from_static("inline");
+const NOSNIFF: HeaderValue = HeaderValue::from_static("nosniff");
+const SANDBOX: HeaderValue = HeaderValue::from_static("sandbox");
 
 async fn original(
     Path(id): Path<String>,
@@ -78,6 +86,8 @@ async fn original(
             (header::CONTENT_DISPOSITION, content_disposition(&att.title)),
             (header::CACHE_CONTROL, IMMUTABLE_CACHE),
             (header::ETAG, etag(&att.sha256)?),
+            (header::X_CONTENT_TYPE_OPTIONS, NOSNIFF),
+            (header::CONTENT_SECURITY_POLICY, SANDBOX),
         ],
         Body::from_stream(ReaderStream::new(file)),
     )
@@ -102,6 +112,8 @@ async fn thumb(
             ),
             (header::CACHE_CONTROL, IMMUTABLE_CACHE),
             (header::ETAG, etag(&format!("{}-{size}", att.sha256))?),
+            (header::X_CONTENT_TYPE_OPTIONS, NOSNIFF),
+            (header::CONTENT_SECURITY_POLICY, SANDBOX),
         ],
         thumb.data,
     )
