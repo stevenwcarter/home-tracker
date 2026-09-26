@@ -5,6 +5,7 @@ mod support;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::thread;
 
 use axum_test::{TestResponse, TestServer};
 use diesel::prelude::*;
@@ -395,4 +396,48 @@ async fn graphql_urls_resolve_on_the_http_routes() {
     thumb.assert_status_ok();
     assert_eq!(header(&thumb, "content-type"), "image/webp");
     assert_eq!(dimensions(&thumb), (300, 225));
+}
+
+#[tokio::test]
+async fn originals_are_not_compressed() {
+    // Originals are served byte-for-byte under their sha256 ETag; re-encoding
+    // them would only waste CPU on already-compressed photos.
+    let f = Fixture::new();
+    let bytes = "plain text that is long enough to be worth compressing. ".repeat(20);
+    f.add_file("att-text", "notes.txt", "text/plain", bytes.as_bytes());
+
+    let response = f
+        .server
+        .get("/attachments/att-text")
+        .add_header("accept-encoding", "gzip")
+        .await;
+
+    response.assert_status_ok();
+    assert!(
+        response.maybe_header("content-encoding").is_none(),
+        "originals must not be compressed"
+    );
+    assert_eq!(response.as_bytes().as_ref(), bytes.as_bytes());
+
+    // The GraphQL endpoint is still compressed.
+    let graphql = f
+        .server
+        .post("/graphql")
+        .add_header("accept-encoding", "gzip")
+        .json(&json!({ "query": "{ entityTypes { id name description icon isLocation } }" }))
+        .await;
+    graphql.assert_status_ok();
+    assert_eq!(header(&graphql, "content-encoding"), "gzip");
+}
+
+#[tokio::test]
+async fn generation_is_bounded_by_the_semaphore() {
+    let f = Fixture::new();
+    let cores = thread::available_parallelism().map_or(2, |n| n.get());
+    assert_eq!(f.thumbs.permits(), cores);
+
+    f.add_photo("att-1");
+    let response = f.server.get("/attachments/att-1/thumb/300").await;
+    response.assert_status_ok();
+    assert_eq!(f.thumbs.generations(), 1);
 }

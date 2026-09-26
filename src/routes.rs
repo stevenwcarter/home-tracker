@@ -1,4 +1,5 @@
-//! Top-level router: GraphQL, attachments, static assets, SPA fallback, compression.
+//! Top-level router: GraphQL, attachments, static assets, SPA fallback, compression
+//! (everything but attachments).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -65,16 +66,21 @@ pub fn app(pool: SqlitePool, data_dir: PathBuf) -> Router {
 /// [`app`] around a caller-supplied thumbnail service, so tests can observe it.
 pub fn app_with_thumbnails(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) -> Router {
     let schema = Arc::new(create_schema());
-    Router::new()
+    let compressed = Router::new()
         .route("/assets/{*path}", get(static_handler))
         // Load-bearing position: `Router::layer` only wraps routes already added, so
         // this must stay after `/assets` and before `/`/the fallback, or the SPA shell
         // (and a missing-asset 404) would be cached immutably too. Pinned by
         // tests/spa_routes.rs.
         .layer(middleware::from_fn(immutable_cache))
-        .merge(attachment_routes(pool.clone(), thumbnails))
-        .merge(graphql_routes(pool, schema))
+        .merge(graphql_routes(pool.clone(), schema))
         .route("/", get(index_handler))
         .fallback(get(index_handler))
-        .layer(CompressionLayer::new())
+        .layer(CompressionLayer::new());
+    // Merged outside the compression layer: originals are served byte-for-byte
+    // under their sha256 ETag, and photos gain nothing from re-encoding.
+    // Pinned by tests/attachments.rs.
+    Router::new()
+        .merge(attachment_routes(pool, thumbnails))
+        .merge(compressed)
 }

@@ -5,11 +5,12 @@ use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
+use std::thread;
 use std::time::Instant;
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Semaphore};
 use tokio::task;
 
 use crate::db::SqlitePool;
@@ -26,27 +27,39 @@ type KeyLocks = StdMutex<HashMap<Key, Arc<Mutex<()>>>>;
 /// Looks thumbnails up in the database and, on a miss, generates, stores and
 /// returns them. Concurrent misses for the same key wait for one generation
 /// instead of each decoding the original; different keys never wait on each
-/// other.
+/// other. At most [`ThumbnailService::permits`] generations run at once, so a
+/// burst of misses cannot hold every original in memory or starve the
+/// blocking pool.
 pub struct ThumbnailService {
     pool: SqlitePool,
     data_dir: PathBuf,
     locks: KeyLocks,
     generations: AtomicU64,
+    permits: Semaphore,
+    permit_count: usize,
 }
 
 impl ThumbnailService {
     pub fn new(pool: SqlitePool, data_dir: PathBuf) -> Arc<Self> {
+        let permit_count = thread::available_parallelism().map_or(2, |n| n.get());
         Arc::new(Self {
             pool,
             data_dir,
             locks: StdMutex::new(HashMap::new()),
             generations: AtomicU64::new(0),
+            permits: Semaphore::new(permit_count),
+            permit_count,
         })
     }
 
     /// The data directory originals are read from.
     pub fn data_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    /// How many generations may run concurrently: one per available core.
+    pub fn permits(&self) -> usize {
+        self.permit_count
     }
 
     /// How many thumbnails this service has generated (cache hits excluded).
@@ -104,6 +117,12 @@ impl ThumbnailService {
     /// Decodes and resizes `att`'s original off the async runtime. `None`
     /// when the original file is missing.
     async fn generate(&self, att: &Attachment, size: u32) -> Result<Option<thumbnail::Generated>> {
+        // Held across the read too, so waiting requests do not each buffer an original.
+        let _permit = self
+            .permits
+            .acquire()
+            .await
+            .context("thumbnail semaphore closed")?;
         let path = attachment::original_path(&self.data_dir, &att.sha256);
         let bytes = match tokio::fs::read(&path).await {
             Err(err) if err.kind() == ErrorKind::NotFound => {

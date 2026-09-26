@@ -4,7 +4,7 @@ use std::io::Cursor;
 
 use anyhow::{Context, Result};
 use image::metadata::Orientation;
-use image::{DynamicImage, ImageDecoder, ImageReader};
+use image::{DynamicImage, ImageDecoder, ImageReader, Limits};
 
 /// Quality passed to the WebP encoder for generated thumbnails (0-100).
 pub const WEBP_QUALITY: f32 = 80.0;
@@ -18,15 +18,31 @@ pub struct Generated {
     pub height: u32,
 }
 
+/// The largest original edge, in pixels, that will be decoded (8192² ≈ 64 MP).
+const MAX_DECODE_EDGE: u32 = 8192;
+
+/// The most the decoder may allocate for one original.
+const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+
+/// Decoder bounds. A small file can declare enormous dimensions, so the
+/// header is checked against these before any pixel buffer is allocated.
+fn decode_limits() -> Limits {
+    let mut limits = Limits::default();
+    limits.max_image_width = Some(MAX_DECODE_EDGE);
+    limits.max_image_height = Some(MAX_DECODE_EDGE);
+    limits.max_alloc = Some(MAX_DECODE_ALLOC);
+    limits
+}
+
 /// Decodes `original`, applies its EXIF orientation, fits it inside a
 /// `size × size` box without upscaling, and encodes WebP at [`WEBP_QUALITY`].
 /// Pure and blocking: call it from `spawn_blocking`.
 pub fn generate_bytes(original: &[u8], size: u32) -> Result<Generated> {
-    let mut decoder = ImageReader::new(Cursor::new(original))
+    let mut reader = ImageReader::new(Cursor::new(original))
         .with_guessed_format()
-        .context("sniffing the image format")?
-        .into_decoder()
-        .context("opening the image")?;
+        .context("sniffing the image format")?;
+    reader.limits(decode_limits());
+    let mut decoder = reader.into_decoder().context("opening the image")?;
     let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
     let mut img = DynamicImage::from_decoder(decoder).context("decoding the image")?;
     img.apply_orientation(orientation);
@@ -73,7 +89,7 @@ pub fn allowed_size(requested: i64) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use image::{DynamicImage, ImageEncoder, RgbImage};
+    use image::{DynamicImage, ImageEncoder, ImageError, RgbImage};
     use std::io::Cursor;
 
     use super::*;
@@ -155,6 +171,59 @@ mod tests {
         // And without the tag the same bytes stay landscape.
         let plain = generate_bytes(&jpeg(400, 200), 1200).unwrap();
         assert_eq!((plain.width, plain.height), (400, 200));
+    }
+
+    /// The CRC-32 (IEEE) of `bytes`, bit by bit: enough to frame a PNG chunk.
+    fn crc32(bytes: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for &byte in bytes {
+            crc ^= u32::from(byte);
+            for _ in 0..8 {
+                crc = if crc & 1 == 1 {
+                    (crc >> 1) ^ 0xEDB8_8320
+                } else {
+                    crc >> 1
+                };
+            }
+        }
+        !crc
+    }
+
+    fn png_chunk(out: &mut Vec<u8>, kind: &[u8; 4], data: &[u8]) {
+        out.extend_from_slice(&u32::try_from(data.len()).unwrap().to_be_bytes());
+        let start = out.len();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(data);
+        let crc = crc32(&out[start..]);
+        out.extend_from_slice(&crc.to_be_bytes());
+    }
+
+    /// A well-framed PNG whose IHDR claims `w`×`h` 8-bit greyscale pixels but
+    /// which carries no pixel data.
+    fn png_header(w: u32, h: u32) -> Vec<u8> {
+        let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
+        let mut ihdr = Vec::new();
+        ihdr.extend_from_slice(&w.to_be_bytes());
+        ihdr.extend_from_slice(&h.to_be_bytes());
+        // Bit depth 8, greyscale, deflate, adaptive filtering, no interlace.
+        ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+        png_chunk(&mut out, b"IHDR", &ihdr);
+        png_chunk(&mut out, b"IDAT", &[]);
+        png_chunk(&mut out, b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn oversized_dimensions_are_rejected_by_limits() {
+        // 20000×20000 greyscale is 400 MB: under the crate's 512 MiB default
+        // allocation cap, so only the explicit dimension limit stops it before
+        // the decoder allocates the buffer.
+        let err = generate_bytes(&png_header(20_000, 20_000), 300).unwrap_err();
+        assert!(
+            err.chain()
+                .any(|e| matches!(e.downcast_ref(), Some(ImageError::Limits(_)))),
+            "expected a limits error, got {err:#}"
+        );
     }
 
     #[test]
