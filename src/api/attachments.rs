@@ -1,37 +1,23 @@
 //! `GET /attachments/{id}` (the original file) and
-//! `GET /attachments/{id}/thumb/{size}` (a WebP thumbnail).
-//!
-//! Both are immutably cacheable: the SPA's URLs carry a version (`?v=`), and
-//! an original's bytes are addressed by their sha256, which is also the ETag.
-//!
-//! Both are also hardened: the bytes are user-supplied but served from the
-//! app's origin, so `X-Content-Type-Options: nosniff` stops the browser
-//! guessing a more dangerous type, and `Content-Security-Policy: sandbox`
-//! makes an HTML or SVG original opened directly a sandboxed document that
-//! cannot run script on the app origin.
+//! `GET /attachments/{id}/thumb/{size}` (a WebP thumbnail), served by
+//! [`crate::api::blob`], which documents their caching and hardening headers.
 
-use std::fmt::Write as _;
-use std::io::{self, ErrorKind};
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::{Context, anyhow};
+use anyhow::Context;
 use axum::Router;
-use axum::body::Body;
 use axum::extract::{Extension, Path};
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use tokio::fs::File;
-use tokio_util::io::ReaderStream;
-use tracing::Instrument;
 
-use crate::api::{AppError, IMMUTABLE_CACHE};
+use crate::api::AppError;
+use crate::api::blob::{self, BlobOwner};
 use crate::db::SqlitePool;
 use crate::models::Attachment;
 use crate::svc::attachment;
 use crate::svc::blob::Blob;
-use crate::svc::thumbnail::{allowed_size, is_thumbnailable};
 use crate::svc::thumbnail_service::ThumbnailService;
 
 /// The attachment routes, with their state layered on. Originals are read
@@ -51,53 +37,22 @@ pub fn attachment_routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>) ->
         .layer(Extension(data_dir))
 }
 
-const OCTET_STREAM: HeaderValue = HeaderValue::from_static("application/octet-stream");
-const INLINE: HeaderValue = HeaderValue::from_static("inline");
-const NOSNIFF: HeaderValue = HeaderValue::from_static("nosniff");
-const SANDBOX: HeaderValue = HeaderValue::from_static("sandbox");
-
 async fn original(
     Path(id): Path<String>,
     Extension(pool): Extension<SqlitePool>,
     Extension(data_dir): Extension<Arc<PathBuf>>,
 ) -> Result<Response, AppError> {
-    let att = load(&pool, &id)?;
-    let Some(att) = att else {
+    let Some(att) = load(&pool, &id)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    let path = attachment::original_path(&data_dir, &att.sha256);
-    // Paths go to the log only: error messages reach clients.
-    let unreadable = |err: io::Error| {
-        tracing::error!(%id, path = %path.display(), %err, "could not read original");
-        anyhow!(err).context(format!("reading the original of attachment {id:?}"))
-    };
-    let file = match File::open(&path).await {
-        Ok(file) => file,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            tracing::warn!(%id, path = %path.display(), "original file missing");
-            return Ok(StatusCode::NOT_FOUND.into_response());
-        }
-        Err(err) => return Err(unreadable(err).into()),
-    };
-    // The file's own length, not `size_bytes`: a stale row must not make the
-    // response lie about its body.
-    let len = file.metadata().await.map_err(unreadable)?.len();
-    Ok((
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_str(&att.mime_type).unwrap_or(OCTET_STREAM),
-            ),
-            (header::CONTENT_LENGTH, HeaderValue::from(len)),
-            (header::CONTENT_DISPOSITION, content_disposition(&att.title)),
-            (header::CACHE_CONTROL, IMMUTABLE_CACHE),
-            (header::ETAG, etag(&att.sha256)?),
-            (header::X_CONTENT_TYPE_OPTIONS, NOSNIFF),
-            (header::CONTENT_SECURITY_POLICY, SANDBOX),
-        ],
-        Body::from_stream(ReaderStream::new(file)),
+    blob::serve_original(
+        &data_dir,
+        &Blob::from(&att),
+        &att.title,
+        BlobOwner::Attachment,
+        &id,
     )
-        .into_response())
+    .await
 }
 
 async fn thumb(
@@ -105,133 +60,25 @@ async fn thumb(
     Extension(pool): Extension<SqlitePool>,
     Extension(thumbnails): Extension<Arc<ThumbnailService>>,
 ) -> Result<Response, AppError> {
-    let Some(size) = size.parse::<i64>().ok().and_then(allowed_size) else {
-        return Ok((StatusCode::BAD_REQUEST, "size must be a positive integer").into_response());
+    let size = match blob::thumb_size(&size) {
+        Ok(size) => size,
+        Err(bad) => return Ok(bad.into_response()),
     };
-    let att = load(&pool, &id)?;
-    let Some(att) = att.filter(|att| is_thumbnailable(&att.mime_type)) else {
+    let Some(att) = load(&pool, &id)? else {
         return Ok(StatusCode::NOT_FOUND.into_response());
     };
-    // The span puts the attachment id on the service's log lines, which only
-    // know the blob.
-    let thumb = thumbnails
-        .get_or_generate(&Blob::from(&att), size)
-        .instrument(tracing::info_span!("thumb", %id))
-        .await
-        .with_context(|| format!("thumbnail of attachment {id:?}"))?;
-    let Some(thumb) = thumb else {
-        return Ok(StatusCode::NOT_FOUND.into_response());
-    };
-    Ok((
-        [
-            (
-                header::CONTENT_TYPE,
-                HeaderValue::from_str(&thumb.mime_type).unwrap_or(OCTET_STREAM),
-            ),
-            (header::CACHE_CONTROL, IMMUTABLE_CACHE),
-            (
-                header::ETAG,
-                etag(&format!("{}-{}", att.sha256, size.get()))?,
-            ),
-            (header::X_CONTENT_TYPE_OPTIONS, NOSNIFF),
-            (header::CONTENT_SECURITY_POLICY, SANDBOX),
-        ],
-        thumb.data,
+    blob::serve_thumb(
+        &thumbnails,
+        &Blob::from(&att),
+        size,
+        BlobOwner::Attachment,
+        &id,
     )
-        .into_response())
+    .await
 }
 
 /// Attachment `id`, if it exists.
 fn load(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<Attachment>> {
     let mut conn = pool.get().context("db connection")?;
     attachment::get(&mut conn, id)
-}
-
-/// A strong ETag: `tag` in double quotes.
-fn etag(tag: &str) -> anyhow::Result<HeaderValue> {
-    HeaderValue::from_str(&format!("\"{tag}\"")).with_context(|| format!("etag for {tag:?}"))
-}
-
-/// `inline; filename="…"`, plus an RFC 6266 `filename*` when the title is not
-/// ASCII. Quotes and backslashes are dropped and each run of control
-/// characters becomes one space, so a hostile title can neither inject a
-/// header nor break out of the quoted string.
-fn content_disposition(title: &str) -> HeaderValue {
-    let mut name = String::with_capacity(title.len());
-    let mut after_control = false;
-    for c in title.chars() {
-        if c.is_control() {
-            after_control = true;
-        } else if c != '"' && c != '\\' {
-            if after_control && !name.is_empty() {
-                name.push(' ');
-            }
-            after_control = false;
-            name.push(c);
-        }
-    }
-    let name = match name.trim() {
-        "" => "attachment",
-        trimmed => trimmed,
-    };
-    let value = if name.is_ascii() {
-        format!("inline; filename=\"{name}\"")
-    } else {
-        let fallback: String = name
-            .chars()
-            .map(|c| if c.is_ascii() { c } else { '_' })
-            .collect();
-        format!(
-            "inline; filename=\"{fallback}\"; filename*=UTF-8''{}",
-            percent_encode(name)
-        )
-    };
-    // Every byte left is visible ASCII or a space, so this cannot fail.
-    HeaderValue::from_str(&value).unwrap_or(INLINE)
-}
-
-/// RFC 5987 `value-chars`: `attr-char`s verbatim, every other byte as `%XX`.
-fn percent_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() * 3);
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"!#$&+-.^_`|~".contains(&byte) {
-            out.push(char::from(byte));
-        } else {
-            // Writing to a `String` cannot fail.
-            let _ = write!(out, "%{byte:02X}");
-        }
-    }
-    out
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn disposition(title: &str) -> String {
-        content_disposition(title).to_str().unwrap().to_owned()
-    }
-
-    #[test]
-    fn plain_titles_pass_through() {
-        assert_eq!(
-            disposition("manual.pdf"),
-            r#"inline; filename="manual.pdf""#
-        );
-    }
-
-    #[test]
-    fn hostile_titles_are_neutralised() {
-        assert_eq!(disposition("a\\b\"c\r\n\td"), r#"inline; filename="abc d""#);
-        assert_eq!(disposition("\r\n\"\""), r#"inline; filename="attachment""#);
-        assert_eq!(disposition(""), r#"inline; filename="attachment""#);
-    }
-
-    #[test]
-    fn non_ascii_titles_get_an_extended_parameter() {
-        assert_eq!(
-            disposition("naïve \"x\".jpg"),
-            "inline; filename=\"na_ve x.jpg\"; filename*=UTF-8''na%C3%AFve%20x.jpg"
-        );
-    }
 }

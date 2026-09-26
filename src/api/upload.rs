@@ -24,6 +24,9 @@
 //! unknown entity, 413, 415 for a format we do not accept, 422 for an image
 //! whose header or pixel data does not decode (or exceeds the decode limits),
 //! 500 (logged, with a path-free message).
+//!
+//! The staging upload in `api::ingest` reuses the form reader, the limits
+//! and the error shape, adding 409 for a batch that is no longer collecting.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -69,8 +72,17 @@ struct UploadState {
 
 /// The upload route, storing originals under `data_dir`.
 pub fn upload_routes(pool: SqlitePool, data_dir: Arc<PathBuf>) -> Router {
-    Router::new()
-        .route("/api/upload/{entity_id}", post(upload))
+    with_upload_limits(Router::new().route("/api/upload/{entity_id}", post(upload)))
+        .with_state(UploadState { pool, data_dir })
+}
+
+/// `router`'s routes (those added so far) with the upload body limit and its
+/// JSON 413, in place of axum's default limit.
+pub(crate) fn with_upload_limits<S>(router: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    router
         // The limit layer governs: axum's 2 MiB default for `Multipart`
         // would otherwise cut in first.
         .layer(DefaultBodyLimit::disable())
@@ -80,12 +92,11 @@ pub fn upload_routes(pool: SqlitePool, data_dir: Arc<PathBuf>) -> Router {
         // Outside the limit layer, which refuses an over-long `Content-Length`
         // with a plain-text 413 before the handler runs.
         .layer(middleware::map_response(json_too_large))
-        .with_state(UploadState { pool, data_dir })
 }
 
 /// Why an upload request failed; each variant maps to one status.
 #[derive(Debug, thiserror::Error)]
-enum UploadFailure {
+pub(crate) enum UploadFailure {
     #[error("Forbidden: write access required")]
     Forbidden,
     #[error("the upload is larger than 25 MiB")]
@@ -124,7 +135,8 @@ impl UploadFailure {
             | Self::DuplicateFile
             | Self::NotMultipart(_)
             | Self::Malformed(_) => StatusCode::BAD_REQUEST,
-            Self::Store(UploadError::NotFound) => StatusCode::NOT_FOUND,
+            Self::Store(UploadError::NotFound(_)) => StatusCode::NOT_FOUND,
+            Self::Store(UploadError::Conflict) => StatusCode::CONFLICT,
             Self::Store(UploadError::Unsupported) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             Self::Store(UploadError::Unreadable) => StatusCode::UNPROCESSABLE_ENTITY,
             Self::Store(UploadError::Io(_)) | Self::Internal(_) => {
@@ -219,16 +231,19 @@ async fn upload(
 }
 
 /// What the form carried.
-struct Form {
-    staged: Staged,
+pub(crate) struct Form {
+    pub(crate) staged: Staged,
     /// The client's name for the file; advisory, used only for the title.
-    filename: Option<String>,
-    primary: bool,
+    pub(crate) filename: Option<String>,
+    pub(crate) primary: bool,
 }
 
 /// Reads the form, staging its one `file` field under `originals_dir`.
 /// Fields other than `file` and `primary` are skipped.
-async fn receive(mut multipart: Multipart, originals_dir: PathBuf) -> Result<Form, UploadFailure> {
+pub(crate) async fn receive(
+    mut multipart: Multipart,
+    originals_dir: PathBuf,
+) -> Result<Form, UploadFailure> {
     let mut file = None;
     let mut primary = false;
     while let Some(field) = multipart.next_field().await? {
@@ -304,6 +319,7 @@ mod tests {
     use axum::body;
 
     use super::*;
+    use crate::svc::upload::UploadTarget;
 
     #[test]
     fn primary_flag_is_lenient() {
@@ -318,7 +334,15 @@ mod tests {
     #[test]
     fn store_errors_map_to_their_statuses() {
         for (err, status) in [
-            (UploadError::NotFound, StatusCode::NOT_FOUND),
+            (
+                UploadError::NotFound(UploadTarget::Entity),
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                UploadError::NotFound(UploadTarget::IngestItem),
+                StatusCode::NOT_FOUND,
+            ),
+            (UploadError::Conflict, StatusCode::CONFLICT),
             (UploadError::Unsupported, StatusCode::UNSUPPORTED_MEDIA_TYPE),
             (UploadError::Unreadable, StatusCode::UNPROCESSABLE_ENTITY),
             (

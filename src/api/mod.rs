@@ -5,7 +5,9 @@ use axum::response::{IntoResponse, Response};
 
 pub mod actor;
 pub mod attachments;
+pub mod blob;
 pub mod graphql;
+pub mod ingest;
 pub mod upload;
 
 /// `Cache-Control` for content-addressed or versioned responses.

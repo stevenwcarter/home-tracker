@@ -108,7 +108,7 @@ pub fn attachment_urls(att: &Attachment) -> (String, Option<String>) {
 /// A short, stable cache-busting tag for `sha256`: its first 12 hex characters
 /// (the whole string if shorter), which is already plenty of entropy per
 /// attachment id to change whenever the underlying bytes do.
-fn version_tag(sha256: &str) -> &str {
+pub(crate) fn version_tag(sha256: &str) -> &str {
     &sha256[..sha256.len().min(12)]
 }
 

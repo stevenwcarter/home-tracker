@@ -2,15 +2,17 @@
 //! its type from its bytes, check its header decodes within the thumbnailer's
 //! limits, move it to its content address (or drop it when those bytes are
 //! already stored), make its smallest thumbnail (which decodes every pixel,
-//! so a damaged body is refused too), and insert its attachment row and that
-//! thumbnail under the primary rule.
+//! so a damaged body is refused too), and insert its row and that thumbnail
+//! in one transaction: an attachment under the primary rule ([`store`]) or a
+//! staged ingest photo ([`store_ingest_photo`]).
 
+use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
 use anyhow::{Context, anyhow};
-use chrono::Utc;
+use chrono::{NaiveDateTime, Utc};
 use diesel::prelude::*;
 use image::{ImageDecoder, ImageReader};
 use sha2::{Digest, Sha256};
@@ -18,24 +20,50 @@ use tempfile::TempPath;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::kinds::AttachmentKind;
-use crate::models::{Attachment, Thumbnail};
+use crate::kinds::{AttachmentKind, IngestBatchStatus};
+use crate::models::{Attachment, IngestPhoto, Thumbnail};
 use crate::schema::attachments;
+use crate::svc::ingest::{self, IngestError};
 use crate::svc::sniff::{self, ImageFormat, SNIFF_LEN};
 use crate::svc::thumbnail::ThumbSize;
 use crate::svc::{attachment, entity, thumbnail};
 
+/// What an upload is for: the row an [`UploadError::NotFound`] could not find.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UploadTarget {
+    Entity,
+    IngestItem,
+}
+
+impl fmt::Display for UploadTarget {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::Entity => "entity",
+            Self::IngestItem => "ingest item",
+        })
+    }
+}
+
 /// Why an upload was not stored. Each variant maps to one HTTP status.
 #[derive(Debug, thiserror::Error)]
 pub enum UploadError {
-    #[error("entity not found")]
-    NotFound,
+    #[error("{0} not found")]
+    NotFound(UploadTarget),
+    /// The ingest item's batch has been submitted.
+    #[error("This batch is no longer collecting photos")]
+    Conflict,
     #[error("only JPEG, PNG, GIF and WebP images are supported")]
     Unsupported,
     #[error("the file is not a readable image")]
     Unreadable,
     #[error(transparent)]
     Io(#[from] anyhow::Error),
+}
+
+impl From<diesel::result::Error> for UploadError {
+    fn from(err: diesel::result::Error) -> Self {
+        Self::Io(err.into())
+    }
 }
 
 /// An upload being received: a temp file under `originals/` that is hashed
@@ -146,10 +174,45 @@ pub fn store(
     // Refused before any file work; `commit` checks again inside its
     // transaction in case the entity is deleted meanwhile.
     if entity::get(conn, entity_id)?.is_none() {
-        return Err(UploadError::NotFound);
+        return Err(UploadError::NotFound(UploadTarget::Entity));
     }
     let placed = place(data_dir, staged)?;
     commit(conn, data_dir, entity_id, placed, filename, primary)
+}
+
+/// Stages `staged` as the next photo of ingest item `item_id`, titled after
+/// `filename`, through the same checks, content address and
+/// [`ThumbSize::SMALLEST`] thumbnail as [`store`]. An unknown item is
+/// [`UploadError::NotFound`]; an item whose batch is no longer collecting is
+/// [`UploadError::Conflict`]. On any failure the temp file is removed, and so
+/// is a newly placed original that nothing references.
+///
+/// # Blocking
+///
+/// As [`store`]: call it from `spawn_blocking`.
+pub fn store_ingest_photo(
+    conn: &mut SqliteConnection,
+    data_dir: &Path,
+    item_id: &str,
+    staged: Staged,
+    filename: Option<&str>,
+) -> Result<IngestPhoto, UploadError> {
+    // Refused before any file work; the insert checks again inside its
+    // transaction in case the batch is submitted meanwhile.
+    require_collecting_item(conn, item_id)?;
+    let placed = place(data_dir, staged)?;
+    commit_ingest_photo(conn, data_dir, item_id, placed, filename)
+}
+
+/// `Ok` when ingest item `item_id` exists and its batch is collecting.
+fn require_collecting_item(conn: &mut SqliteConnection, item_id: &str) -> Result<(), UploadError> {
+    let item =
+        ingest::get_item(conn, item_id)?.ok_or(UploadError::NotFound(UploadTarget::IngestItem))?;
+    match ingest::get_batch(conn, &item.batch_id)? {
+        Some(batch) if batch.status == IngestBatchStatus::Collecting => Ok(()),
+        Some(_) => Err(UploadError::Conflict),
+        None => Err(UploadError::NotFound(UploadTarget::IngestItem)),
+    }
 }
 
 /// An upload whose bytes are validated and stored at their content address,
@@ -186,10 +249,8 @@ fn place(data_dir: &Path, staged: Staged) -> Result<Placed, UploadError> {
     })
 }
 
-/// Makes the smallest thumbnail of `placed` and inserts it with its
-/// attachment row, then releases the claim. On failure, including an original
-/// whose pixels do not decode, the original is removed unless something else
-/// references it.
+/// Inserts `placed` as a photo attachment of `entity_id` under the primary
+/// rule, through [`commit_placed`].
 fn commit(
     conn: &mut SqliteConnection,
     data_dir: &Path,
@@ -211,32 +272,91 @@ fn commit(
         created_at: now,
         updated_at: now,
     };
-    // Decoded before the transaction, so the write lock is not held for it.
-    let inserted = smallest_thumbnail(data_dir, &row).and_then(|thumb| {
-        // Immediate, so simultaneous first uploads to one entity queue for
-        // the write lock instead of failing to upgrade a read transaction.
-        conn.immediate_transaction(|conn| insert_photo(conn, row, &thumb, primary))
-            .map_err(UploadError::Io)
-            .and_then(|row| row.ok_or(UploadError::NotFound))
-    });
-    drop(placed.claim);
-    inserted
-        .map(|attachment| StoredUpload { attachment })
-        .inspect_err(|_| attachment::remove_original(conn, data_dir, &placed.sha256))
+    commit_placed(conn, data_dir, placed, now, |conn, thumb| {
+        insert_photo(conn, row, thumb, primary)?.ok_or(UploadError::NotFound(UploadTarget::Entity))
+    })
+    .map(|attachment| StoredUpload { attachment })
 }
 
-/// The [`ThumbSize::SMALLEST`] thumbnail of `row`'s placed original, or
-/// [`UploadError::Unreadable`] when its pixels do not decode.
-fn smallest_thumbnail(data_dir: &Path, row: &Attachment) -> Result<Thumbnail, UploadError> {
-    let original = fs::read(attachment::original_path(data_dir, &row.sha256))
+/// Inserts `placed` as the next staged photo of ingest item `item_id`,
+/// through [`commit_placed`]. The ingest row goes in first, so the thumbnail
+/// has the sharer [`attachment::insert_thumbnail`] requires.
+fn commit_ingest_photo(
+    conn: &mut SqliteConnection,
+    data_dir: &Path,
+    item_id: &str,
+    placed: Placed,
+    filename: Option<&str>,
+) -> Result<IngestPhoto, UploadError> {
+    let title = clean_title(filename, placed.format.extension());
+    let (sha256, mime_type, size_bytes) = (
+        placed.sha256.clone(),
+        placed.format.mime(),
+        placed.size_bytes,
+    );
+    commit_placed(
+        conn,
+        data_dir,
+        placed,
+        Utc::now().naive_utc(),
+        |conn, thumb| {
+            let photo =
+                ingest::insert_photo_row(conn, item_id, &sha256, mime_type, size_bytes, &title)
+                    .map_err(ingest_refusal)?;
+            attachment::insert_thumbnail(conn, thumb)?;
+            Ok(photo)
+        },
+    )
+}
+
+/// An [`ingest::insert_photo_row`] failure as an upload error: its refusals
+/// keep their status, anything else is [`UploadError::Io`].
+fn ingest_refusal(err: anyhow::Error) -> UploadError {
+    match err.downcast_ref::<IngestError>() {
+        Some(IngestError::NotFound(_)) => UploadError::NotFound(UploadTarget::IngestItem),
+        Some(IngestError::NotCollecting) => UploadError::Conflict,
+        _ => UploadError::Io(err),
+    }
+}
+
+/// Makes the smallest thumbnail of `placed` (stamped `now`) and runs
+/// `insert` with it in one immediate transaction, then releases the claim.
+/// On failure, including an original whose pixels do not decode, the
+/// original is removed unless something else references it.
+fn commit_placed<T>(
+    conn: &mut SqliteConnection,
+    data_dir: &Path,
+    placed: Placed,
+    now: NaiveDateTime,
+    insert: impl FnOnce(&mut SqliteConnection, &Thumbnail) -> Result<T, UploadError>,
+) -> Result<T, UploadError> {
+    // Decoded before the transaction, so the write lock is not held for it.
+    let inserted = smallest_thumbnail(data_dir, &placed.sha256, now).and_then(|thumb| {
+        // Immediate, so simultaneous first uploads to one entity queue for
+        // the write lock instead of failing to upgrade a read transaction.
+        conn.immediate_transaction(|conn| insert(conn, &thumb))
+    });
+    drop(placed.claim);
+    inserted.inspect_err(|_| attachment::remove_original(conn, data_dir, &placed.sha256))
+}
+
+/// The [`ThumbSize::SMALLEST`] thumbnail of the placed original `sha256`,
+/// stamped `created_at`, or [`UploadError::Unreadable`] when its pixels do
+/// not decode.
+fn smallest_thumbnail(
+    data_dir: &Path,
+    sha256: &str,
+    created_at: NaiveDateTime,
+) -> Result<Thumbnail, UploadError> {
+    let original = fs::read(attachment::original_path(data_dir, sha256))
         .context("reading the placed upload")?;
     let generated =
         thumbnail::generate_bytes(&original, ThumbSize::SMALLEST.get()).map_err(|err| {
             let reason = format!("{err:#}");
-            info!(sha256 = %row.sha256, %reason, "refusing an unreadable upload");
+            info!(%sha256, %reason, "refusing an unreadable upload");
             UploadError::Unreadable
         })?;
-    Ok(generated.into_row(row.sha256.clone(), ThumbSize::SMALLEST, row.created_at)?)
+    Ok(generated.into_row(sha256.to_owned(), ThumbSize::SMALLEST, created_at)?)
 }
 
 /// Inserts photo `row` and its `thumb`, making the photo its entity's primary
@@ -363,8 +483,8 @@ mod tests {
     use crate::db::TestDb;
     use crate::schema::thumbnails;
     use crate::svc::fixtures::{
-        SampleIds, attachment as attachment_row, jpeg, png, png_header, png_header_rgba16,
-        png_truncated_body, seed_sample,
+        SampleIds, attachment as attachment_row, ingest_batch, jpeg, png, png_header,
+        png_header_rgba16, png_truncated_body, seed_sample,
     };
 
     /// A migrated, seeded database and an empty data dir with `originals/`.
@@ -682,7 +802,10 @@ mod tests {
         let err = h
             .upload("no-such-entity", &jpeg(8, 8), None, false)
             .unwrap_err();
-        assert!(matches!(err, UploadError::NotFound), "{err:?}");
+        assert!(
+            matches!(err, UploadError::NotFound(UploadTarget::Entity)),
+            "{err:?}"
+        );
         assert!(h.files().is_empty(), "{:?}", h.files());
     }
 
@@ -744,8 +867,111 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(matches!(err, UploadError::NotFound), "{err:?}");
+        assert!(
+            matches!(err, UploadError::NotFound(UploadTarget::Entity)),
+            "{err:?}"
+        );
         assert!(h.files().is_empty(), "{:?}", h.files());
+    }
+
+    #[test]
+    fn stages_an_ingest_photo_with_its_smallest_thumbnail() {
+        let h = Harness::new();
+        let (_, item) = ingest_batch(&mut h.db.pool.get().unwrap(), None);
+        let bytes = jpeg(640, 480);
+        let stage = |bytes: &[u8]| {
+            store_ingest_photo(
+                &mut h.db.pool.get().unwrap(),
+                h.data.path(),
+                &item.id,
+                h.stage(bytes),
+                Some("IMG_1.JPG"),
+            )
+        };
+
+        let first = stage(&bytes).unwrap();
+        let second = stage(&jpeg(8, 8)).unwrap();
+
+        let sha = sha256_hex(&bytes);
+        assert_eq!((first.position, second.position), (0, 1));
+        assert_eq!(first.item_id, item.id);
+        assert_eq!(first.sha256, sha);
+        assert_eq!(first.title, "IMG_1.JPG");
+        assert_eq!(first.mime_type, "image/jpeg");
+        assert_eq!(first.size_bytes, i64::try_from(bytes.len()).unwrap());
+        let mut conn = h.db.pool.get().unwrap();
+        assert_eq!(
+            ingest::get_photo(&mut conn, &first.id).unwrap(),
+            Some(first)
+        );
+        let thumb = attachment::thumbnail(&mut conn, &sha, 300).unwrap();
+        assert!(thumb.is_some(), "the 300px thumbnail is stored with it");
+        assert_eq!(h.files().len(), 2);
+    }
+
+    #[test]
+    fn an_unknown_ingest_item_is_not_found_and_a_submitted_batch_a_conflict() {
+        let h = Harness::new();
+        let mut conn = h.db.pool.get().unwrap();
+        let err = store_ingest_photo(
+            &mut conn,
+            h.data.path(),
+            "no-such-item",
+            h.stage(&jpeg(8, 8)),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, UploadError::NotFound(UploadTarget::IngestItem)),
+            "{err:?}"
+        );
+        let (batch, item) = ingest_batch(&mut conn, None);
+        store_ingest_photo(
+            &mut conn,
+            h.data.path(),
+            &item.id,
+            h.stage(&jpeg(9, 9)),
+            None,
+        )
+        .unwrap();
+        ingest::submit(&mut conn, &batch.id).unwrap();
+
+        let err = store_ingest_photo(
+            &mut conn,
+            h.data.path(),
+            &item.id,
+            h.stage(&jpeg(10, 10)),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, UploadError::Conflict), "{err:?}");
+        assert_eq!(h.files(), [sha256_hex(&jpeg(9, 9))]);
+    }
+
+    #[test]
+    fn a_batch_submitted_after_placing_is_a_conflict_and_leaves_no_file() {
+        // The early check passed, then the batch was submitted: the insert's
+        // own check refuses, and the newly placed original goes.
+        let h = Harness::new();
+        let mut conn = h.db.pool.get().unwrap();
+        let (batch, item) = ingest_batch(&mut conn, None);
+        let kept = store_ingest_photo(
+            &mut conn,
+            h.data.path(),
+            &item.id,
+            h.stage(&jpeg(9, 9)),
+            None,
+        )
+        .unwrap();
+        let placed = place(h.data.path(), h.stage(&jpeg(8, 8))).unwrap();
+        ingest::submit(&mut conn, &batch.id).unwrap();
+
+        let err =
+            commit_ingest_photo(&mut conn, h.data.path(), &item.id, placed, None).unwrap_err();
+
+        assert!(matches!(err, UploadError::Conflict), "{err:?}");
+        assert_eq!(h.files(), [kept.sha256.as_str()]);
     }
 
     #[test]

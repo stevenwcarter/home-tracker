@@ -19,8 +19,8 @@ use crate::kinds::{
 };
 use crate::models::{Attachment, Entity, IngestBatch, IngestItem, IngestPhoto};
 use crate::schema::{attachments, ingest_batches, ingest_items, ingest_photos};
-use crate::svc::attachment;
 use crate::svc::entity::{self, EntityInput};
+use crate::svc::{attachment, thumbnail};
 
 /// Which ingest row a [`IngestError::NotFound`] is about.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -649,6 +649,28 @@ fn require_reviewable(conn: &mut SqliteConnection, id: &str) -> Result<IngestIte
     let item = require_item(conn, id)?;
     ensure!(item.status.is_reviewable(), IngestError::NotReviewable);
     Ok(item)
+}
+
+/// Where staged `photo`'s original is served, with the same `?v=` tag as
+/// [`attachment::original_url`].
+pub fn original_url(photo: &IngestPhoto) -> String {
+    format!(
+        "/ingest/photos/{}?v={}",
+        photo.id,
+        attachment::version_tag(&photo.sha256)
+    )
+}
+
+/// Where a thumbnail of at most `size` pixels of staged `photo` is served;
+/// `None` for non-images, as [`attachment::thumbnail_url`].
+pub fn thumbnail_url(photo: &IngestPhoto, size: i32) -> Option<String> {
+    thumbnail::is_thumbnailable(&photo.mime_type).then(|| {
+        format!(
+            "/ingest/photos/{}/thumb/{size}?v={}",
+            photo.id,
+            attachment::version_tag(&photo.sha256)
+        )
+    })
 }
 
 #[cfg(test)]

@@ -1,6 +1,6 @@
-//! Top-level router: GraphQL, attachments, uploads, static assets, SPA
-//! fallback, compression (everything but attachments and uploads), and the
-//! actor seam around all of it.
+//! Top-level router: GraphQL, attachments, uploads, ingest photos, static
+//! assets, SPA fallback, compression (everything but attachments, uploads and
+//! ingest photos), and the actor seam around all of it.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,6 +21,7 @@ use crate::api::IMMUTABLE_CACHE;
 use crate::api::actor::attach_actor;
 use crate::api::attachments::attachment_routes;
 use crate::api::graphql::graphql_routes;
+use crate::api::ingest::ingest_routes;
 use crate::api::upload::upload_routes;
 use crate::db::SqlitePool;
 use crate::graphql::context::Actor;
@@ -124,10 +125,16 @@ fn routes(pool: SqlitePool, thumbnails: Arc<ThumbnailService>, ai: Arc<AiState>)
         .layer(CompressionLayer::new());
     // Merged outside the compression layer: originals are served byte-for-byte
     // under their sha256 ETag, and photos gain nothing from re-encoding.
-    // Pinned by tests/attachments.rs. Uploads answer small JSON bodies.
+    // Pinned by tests/attachments.rs. Uploads answer small JSON bodies. The
+    // ingest routes are both: a staging upload and staged originals.
     let upload_dir = Arc::new(thumbnails.data_dir().to_path_buf());
     Router::new()
-        .merge(upload_routes(pool.clone(), upload_dir))
+        .merge(upload_routes(pool.clone(), Arc::clone(&upload_dir)))
+        .merge(ingest_routes(
+            pool.clone(),
+            upload_dir,
+            Arc::clone(&thumbnails),
+        ))
         .merge(attachment_routes(pool, thumbnails))
         .merge(compressed)
 }
