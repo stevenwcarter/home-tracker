@@ -4,9 +4,10 @@ A self-hosted home inventory app that replaces [Homebox](https://homebox.softwar
 for a single household. One instance tracks one home: locations, items nested
 inside them, tags, and photos. There is no authentication yet; the server
 trusts every request as a writer. Phase 1 shipped the backend, the database,
-and a home page with four statistic cards. Phase 2 adds the full inventory
-schema, a read-only GraphQL query surface over it, and an importer that reads
-a Homebox backup so the app can run on real data.
+and a home page with four statistic cards. Phase 2 added the full inventory
+schema, a GraphQL query surface over it, and an importer that reads a Homebox
+backup so the app can run on real data. Phases 3 and 4 added browsing and
+editing, and phase 5 adds photo uploads with a gallery on every entity page.
 
 ## Run with Docker
 
@@ -16,7 +17,7 @@ docker run -p 7008:7008 -v ht-data:/data home-tracker:dev
 
 The image is `scratch`-based (musl, no shell) and exposes a `HEALTHCHECK` via
 the binary's own `healthcheck` subcommand. `ht-data` holds the SQLite database
-and, from a later phase, uploaded photos. `just docker-build` builds this
+and the photo originals, imported or uploaded. `just docker-build` builds this
 `home-tracker:dev` tag locally; CI publishes tagged images to the registry
 on every push.
 
@@ -83,6 +84,47 @@ carry `?v=<sha256 prefix>`, so they can be cached by the browser forever and
 still pick up new bytes after a re-import; each response also sets a matching
 `ETag`.
 
+## Uploading photos
+
+Every item and location page has a Photos section: an Add photos button (it
+takes several files at once) and a drop zone over the gallery. Files upload
+one at a time, each with its own status line; a failed file shows why and the
+rest carry on. The gallery shows 300px thumbnails with a Primary badge, a Make
+primary button and a Delete button (confirmed in a dialog); clicking a
+thumbnail opens a 1200px viewer with Previous/Next, closed with Escape.
+
+- **Formats:** JPEG, PNG, GIF and WebP. The server decides the format from
+  the file's first bytes, never from its name or the browser's content type,
+  so a renamed text file is refused (415). A file in one of those formats
+  whose header does not decode, or whose image is over 8192px on a side or
+  would need more than 256 MiB to decode, is refused too (422).
+- **Size:** at most 25 MiB per request (413 above that). Only the upload
+  route has this limit.
+- **Primary photo:** an entity's first photo becomes its primary photo. A
+  later upload sent with `primary=true` takes over, so exactly one photo is
+  primary. Deleting the primary photo promotes the earliest remaining one.
+- **Dedupe:** originals are stored once per content hash under
+  `$DATA_DIR/originals/<sha256>`. Uploading the same bytes to a second entity
+  adds a row, not a file; the file is removed when its last row is deleted.
+- **Thumbnails:** generated on first request at 300, 500 and 1200px (WebP,
+  never upscaled) and cached in the database. An original that fails to
+  decode is remembered for the life of the process, so it is not decoded
+  again on every request; its thumbnails answer 404.
+
+The endpoint is `POST /api/upload/{entityId}` with a multipart `file` field
+and an optional `primary` field (`true`, `1`, `on` or `yes`). It answers 201
+with the stored attachment as JSON (`id`, `kind`, `primary`, `title`,
+`mimeType`, `sizeBytes`, `url`, `thumbnailUrl`), or an error status with
+`{ "error": "..." }`: 400 for a missing, repeated or malformed `file` field,
+403 when the caller may not write, 404 for an unknown entity, and 413, 415
+or 422 as above. The title is the file's name without any path, control
+characters or invisible format characters, at most 255 characters,
+defaulting to `photo.<ext>`.
+
+```bash
+curl -F file=@shelf.jpg -F primary=true http://localhost:7008/api/upload/<entity id>
+```
+
 ## Editing
 
 A location page has Add item, Add location, Edit and Delete buttons; an item
@@ -97,8 +139,9 @@ is a location. Saving a create or edit goes to the entity's own page.
 
 Delete never uses the browser's `confirm()`; it opens an in-app confirmation
 dialog. A location's Delete is disabled while it still holds anything. Deleting an item or location navigates to its parent location, or
-home if it had none. On an item page, each attachment also has its own
-Delete and, for a photo that is not already primary, Make primary.
+home if it had none. Photos are managed in the gallery (see Uploading
+photos); an item's other attachments are listed under Attachments, each with
+its own Delete.
 
 `/types` and `/tags` list every entity type and tag with how many entities
 use it, and let you create, edit in place, and delete from the same table.
@@ -140,7 +183,7 @@ home-tracker/
 │   ├── svc/            business logic, one file per aggregate
 │   ├── graphql/        juniper: context, schema, query, objects/ (one file per type)
 │   ├── import/         Homebox backup importer: source, tables, run, report
-│   ├── api/            axum handlers: graphql
+│   ├── api/            axum handlers: graphql, attachments, upload, actor middleware
 │   ├── routes.rs       router, compression, embedded SPA, /assets cache
 │   └── healthcheck.rs
 ├── site/               Vite + React 19 + TypeScript + Apollo + Tailwind v4
@@ -163,3 +206,4 @@ home-tracker/
 - Phase 2 plan: [`docs/superpowers/plans/2026-09-26-phase-2-real-data-and-import.md`](docs/superpowers/plans/2026-09-26-phase-2-real-data-and-import.md)
 - Phase 3 plan: [`docs/superpowers/plans/2026-09-26-phase-3-browsing.md`](docs/superpowers/plans/2026-09-26-phase-3-browsing.md)
 - Phase 4 plan: [`docs/superpowers/plans/2026-09-27-phase-4-editing.md`](docs/superpowers/plans/2026-09-27-phase-4-editing.md)
+- Phase 5 plan: [`docs/superpowers/plans/2026-09-28-phase-5-photos.md`](docs/superpowers/plans/2026-09-28-phase-5-photos.md)

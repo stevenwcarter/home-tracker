@@ -55,11 +55,11 @@ Single Rust crate at the repo root with an embedded, Vite-built React frontend. 
 - `money.rs`: `Cents`, money as integer minor units
 - `kinds.rs`: closed string enums (`AttachmentKind`, `FieldKind`) stored as lowercase TEXT
 - `models/`: one file per table, Diesel `Queryable`/`Selectable` structs
-- `svc/`: business logic, one file per aggregate (`entity.rs`, `entity_type.rs`, `entity_field.rs`, `tag.rs`, `attachment.rs`, `settings.rs`, `stats.rs`, `thumbnail.rs` sizes/MIME gate, `thumbnail_service.rs` generate-or-cache); `fixtures.rs` is test support (the shared sample inventory)
+- `svc/`: business logic, one file per aggregate (`entity.rs`, `entity_type.rs`, `entity_field.rs`, `tag.rs`, `attachment.rs`, `settings.rs`, `stats.rs`, `thumbnail.rs` sizes/MIME gate/decode limits, `thumbnail_service.rs` generate-or-cache, `sniff.rs` magic-byte format detection, `upload.rs` temp file, dedupe, primary rule); `fixtures.rs` is test support (the shared sample inventory)
 - `graphql/`: juniper: `context.rs` (`GraphQLContext`, `Actor`, `Role`), `schema.rs` (`RootNode`), `query.rs`, `objects/` (one file per GraphQL type)
 - `import/`: Homebox backup importer: `source.rs` (zip or directory), `tables.rs` (row structs), `run.rs` (upsert), `report.rs`
 - `api/`: axum handlers: `graphql.rs` (`/graphql` is POST only; there is no auth in v1, so a GET-triggered mutation would be a LAN CSRF path; `/graphiql` in debug builds), `attachments.rs` (`/attachments/{id}` and its `/thumb/{size}`), `upload.rs` (`POST /api/upload/{entityId}` multipart, 25 MiB limit on that route only, JSON errors), `actor.rs` (middleware attaching the request's `Actor`; handlers read `Extension<Actor>`)
-- `routes.rs`: router, compression, embedded SPA, `/assets` immutable cache
+- `routes.rs`: router, `attach_actor` outermost, compression (not attachments or uploads), embedded SPA, `/assets` immutable cache; `app_with_actor` is the test seam for a read-only actor
 - `healthcheck.rs`: liveness probe used by the Docker `HEALTHCHECK`
 
 ### Frontend (`/site/src/`)
@@ -88,7 +88,7 @@ Never a raw palette class like `bg-zinc-900`. A theme is exactly one block of `-
 
 **Button cursors**: Tailwind v4's Preflight resets buttons to `cursor: default`. `site/src/index.css` restores `cursor: pointer` for non-disabled buttons and `[role="button"]` in one base rule; don't add `cursor-pointer` per button.
 
-**Mutations gate on `ctx.require_write()`**: all eleven `Mutation` resolvers (`graphql/mutation.rs`) call it first, before any input is parsed; a `Role::ReadOnly` actor gets `Forbidden` and no row changes. `Actor::Anonymous` can write in v1; auth later fills the actor.
+**Mutations gate on `ctx.require_write()`**: all eleven `Mutation` resolvers (`graphql/mutation.rs`) call it first, before any input is parsed; a `Role::ReadOnly` actor gets `Forbidden` and no row changes. `Actor::Anonymous` can write in v1. **The actor seam:** `api/actor.rs::attach_actor` puts the `Actor` into every request's extensions, and `/graphql` and the upload handler read `Extension<Actor>`; never build an `Actor` in a handler, since auth will change only that middleware.
 
 **Frontend refetch and eviction**: every mutation hook builds on `useRefetchingMutation` (`hooks/useRefetchingMutation.ts`) with a list of `GetLocations`, `GetSummary`, `GetRootItems`, `GetEntityTypes`, `GetTags` (plus `GetEntity`): after any write, active queries in the list are refetched and inactive ones have their root field evicted (every cached `search` too); create, update and delete all evict the affected entity's parent(s) (`Entity:<id>`, both parents on a move) before `cache.gc()`. A write outside Apollo (the `fetch` photo upload) calls the exported `refetchAfterWrite(client, refetch, ids)` from the same file so both paths share one policy.
 
@@ -104,16 +104,16 @@ Never a raw palette class like `bg-zinc-900`. A theme is exactly one block of `-
 
 **`homebox/` and `homebox-backup/` are local reference material**, excluded via `.git/info/exclude`. Never `git add` them.
 
-**The importer keeps Homebox's UUIDs** as primary keys and upserts by them, so re-running an import is safe. Homebox's two built-in entity types are matched by name (`global.location`, `global.item`) and mapped onto the seeded location/item type ids instead of being inserted again.
-
-**Homebox `path` is ignored.** The importer finds each attachment's blob in the backup by its attachment id and stores it by content hash; Homebox's opaque `path` column plays no part.
+**The importer keeps Homebox's UUIDs** as primary keys and upserts by them, so re-running an import is safe. Homebox's two built-in entity types are matched by name (`global.location`, `global.item`) and mapped onto the seeded location/item type ids instead of being inserted again. **Homebox `path` is ignored:** the importer finds each attachment's blob in the backup by its attachment id and stores it by content hash; Homebox's opaque `path` column plays no part.
 
 **Enum columns are lowercase TEXT behind `kinds.rs`.** `AttachmentKind` and `FieldKind` round-trip through `FromStr`/`Display`; never match on the raw column string elsewhere.
 
-**`svc` reads that return whole rows use `Selectable` models via `as_select()`; scalar reads (`settings::currency`, the `stats` aggregates) select columns directly.** Selecting a model's own columns this way rather than listing them by hand means adding a column to a model cannot silently desync a query.
+**`svc` reads that return whole rows use `Selectable` models via `as_select()`; scalar reads (`settings::currency`, the `stats` aggregates) select columns directly.** Selecting a model's own columns this way rather than listing them by hand means adding a column to a model cannot silently desync a query. SQLite `LIKE`/`lower()` fold case for ASCII only; non-ASCII names sort and match case-sensitively (known limitation).
 
-**SQLite `LIKE`/`lower()` fold case for ASCII only; non-ASCII names sort and match case-sensitively (known limitation).**
+**Attachment URLs carry `?v=<sha256 prefix>`** so they can be cached forever by the browser and still change after a re-import; `is_thumbnailable` (`svc/thumbnail.rs`) is the single MIME gate other code should call rather than re-checking MIME types. `ThumbnailService` remembers an original that failed to decode (keyed by attachment id and sha256, checked after stored thumbnails, for the process lifetime) and answers 404 without decoding it again; 500 bodies never carry a filesystem path (log it instead).
 
-**Attachment URLs carry `?v=<sha256 prefix>`** so they can be cached forever by the browser and still change after a re-import; `is_thumbnailable` (`svc/thumbnail.rs`) is the single MIME gate other code should call rather than re-checking MIME types.
+**Uploads trust bytes, not names.** `svc/sniff.rs` decides the format from magic bytes (JPEG, PNG, GIF, WebP, else 415); the client's content type is ignored and its filename only becomes the title via `clean_title`. `store` then reads the header within `thumbnail::decode_limits()` (8192px edge, 256 MiB decode), else 422, so every stored photo can be thumbnailed. The handler refuses a read-only actor (403) before reading the body, but the 25 MiB `RequestBodyLimitLayer` wraps the route, so an over-limit `Content-Length` gets 413 first. Every error is JSON `{ "error" }`.
+
+**Originals are shared by sha256, guarded by the placing claim.** An upload holds a `PlacingOriginal` claim (`svc/attachment.rs`) from before it checks for or renames its file until its row commits; `remove_original` skips a claimed file and counts sharers under the same lock. The claim is in-process: `home-tracker import` into a data dir a live server is using can still race a delete there (known limitation; re-importing restores the file). Deleting the primary photo promotes the earliest remaining one.
 
 **The location tree is built client-side.** `useLocations` fetches the flat `locations` query and `utils/locationTree.ts` assembles it into a `LocationNode` tree; there is no server-side tree query.

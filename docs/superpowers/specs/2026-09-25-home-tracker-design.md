@@ -357,7 +357,7 @@ Validation rules enforced in `svc`, tested at the GraphQL seam:
 | POST | `/graphql` | juniper_axum. GraphiQL served at `/graphiql` in debug builds only. |
 | GET | `/attachments/{id}` | Streams the original from `$DATA_DIR/originals/<sha256>` with its stored MIME type and `Content-Disposition: inline; filename="<title>"`. Immutable cache headers. |
 | GET | `/attachments/{id}/thumb/{size}` | `size` is rounded **up** to the smallest allowed size ≥ it; above 1200 clamps to 1200; a non-positive or non-numeric size is HTTP 400. Non-image attachments 404. Immutable cache headers. |
-| POST | `/api/upload/{entityId}` | Multipart photo upload (phase 5). Field `file`, optional `primary=true`. Returns the `Attachment` as JSON. |
+| POST | `/api/upload/{entityId}` | Multipart photo upload (phase 5). One `file` field, optional `primary` (`true`/`1`/`on`/`yes`, any case). `201` with JSON `{ id, kind, primary, title, mimeType, sizeBytes, url, thumbnailUrl }`. Errors are JSON `{ "error": "..." }`: `400` missing or repeated `file` field or a malformed form; `403` the actor may not write; `404` unknown entity; `413` body over 25 MiB; `415` sniffed format not JPEG/PNG/GIF/WebP; `422` header does not decode or exceeds the decode limits; `500` with a path-free message. Not compressed. |
 | GET | `/*` | Embedded SPA. Unknown paths fall back to `index.html`. |
 
 Both `url` and `thumbnailUrl` carry `?v=<sha256 prefix>`, the first 12 hex
@@ -370,6 +370,13 @@ Both attachment endpoints also send `X-Content-Type-Options: nosniff` and
 from the app's origin: `nosniff` stops the browser guessing a more dangerous
 type than the stored one, and `sandbox` makes an HTML or SVG original opened
 directly a sandboxed document that cannot run script on the app origin.
+
+Upload ordering: `RequestBodyLimitLayer` (25 MiB, this route only; axum's
+2 MiB `DefaultBodyLimit` is disabled there) wraps the handler, and a
+`map_response` layer outside it rewrites its plain-text 413 as JSON. So an
+over-limit `Content-Length` is 413 before the actor is checked. Inside the
+handler, a caller who may not write gets 403 before the body is read; a body
+that trips the limit mid-stream is also 413, with the temp file removed.
 
 A healthcheck needs no route: the `healthcheck` subcommand connects to
 `127.0.0.1:$PORT`, sends `GET / HTTP/1.0`, reads one byte, exits 0/1.
@@ -434,30 +441,69 @@ thumbnail, one custom field).
      for the same key queue on its mutex and find the cached row on a second
      lookup once the first generator finishes, while different keys proceed
      independently. The last lease dropped removes the map entry;
-  2. reads the original (404 when the file is missing);
+  2. reads the original (404 with a `warn!` when the file is missing; any
+     other read error is a 500 whose message names the attachment, never
+     the path, which goes to the log only);
   3. in `spawn_blocking`: decode with `image`, apply EXIF orientation, resize to
      fit `size×size` preserving aspect ratio (never upscale), encode WebP quality
      80 with the `webp` crate;
   4. inserts the row and streams it.
+
+  An original that fails to decode in step 3 is remembered in
+  `ThumbnailService.failed` (attachment id to sha256, process lifetime) after
+  one `warn!`; later requests for it 404 without decoding. The check runs
+  after the stored-thumbnail lookup, so a failed decode never hides a size
+  already stored (such as an imported 500), and keying on the sha256 means
+  new bytes under the same id (a re-import) are tried again.
 - The same `generate(attachment_id, size)` function is what a future
   pregeneration job will call.
-- Uploads (phase 5): multipart to `/api/upload/{entityId}`, streamed to a temp
-  file while hashing, moved into `originals/`, row inserted, first photo on an
-  entity becomes primary automatically. The body limit runs before the
-  handler, so an over-limit `Content-Length` is 413 even for a caller who may
-  not write; otherwise a read-only caller gets 403 before the body is read.
+- Uploads (phase 5): multipart to `/api/upload/{entityId}` (`api/upload.rs`),
+  streamed chunk by chunk (on a blocking thread, one per upload in flight) to
+  `originals/.upload-<uuid v7>` while hashing; the temp file is removed on any
+  failure or abort. `svc::upload::store` then:
+  1. refuses an unknown entity (404) before any file work;
+  2. sniffs the first bytes (`svc::sniff`): JPEG `FF D8 FF`, the PNG
+     signature, `GIF87a`/`GIF89a`, `RIFF....WEBP`, else 415. The client's
+     content type and filename never decide the format;
+  3. reads the image header under the thumbnailer's `decode_limits()` (8192px
+     per edge, 256 MiB decode buffer), else 422, so every stored photo can be
+     thumbnailed. No pixels are decoded;
+  4. takes an in-process placing claim on `originals/<sha256>`, renames the
+     temp file there if absent or drops it if those bytes are already stored
+     (dedupe), then inserts the row in an immediate transaction that re-checks
+     the entity, and releases the claim. Deleting an attachment removes its
+     original only when no row shares the hash and no upload holds a claim on
+     it, both checked under the claim lock, so a delete racing an upload of
+     identical bytes cannot lose the file. The claim is per process: running
+     `home-tracker import` against a data dir a live server is using can
+     still race a delete there (known limitation; re-importing restores it);
+  5. stores `title` as the client filename's last path component without
+     control or Unicode format characters, at most 255 characters, else
+     `photo.<ext>`; `mime_type` is the sniffed type, `kind = photo`.
+
+  Primary rule: an entity's first photo becomes primary, and `primary=true`
+  on a later upload takes over, so exactly one photo is primary. Deleting the
+  primary photo promotes the earliest remaining photo (by `created_at`, then
+  id).
 
 ## 10. Authentication readiness
 
 - `GraphQLContext.actor: Actor` where `enum Actor { Anonymous, User { id, role } }`
-  and `enum Role { ReadOnly, Write }`. In v1 the context is built with
-  `Actor::Anonymous` and `Actor::can_write()` returns `true` for it. Every
-  mutation resolver starts with `ctx.require_write()?`. When auth lands, only
-  the context constructor and that one method change.
+  and `enum Role { ReadOnly, Write }`. `Actor::can_write()` returns `true` for
+  `Anonymous` in v1. Every mutation resolver starts with `ctx.require_write()?`.
+- The actor comes from one router-level middleware, `api::actor::attach_actor`
+  (`middleware::from_fn`, the outermost layer in `routes::app`), which inserts
+  `Actor::Anonymous` into every request's extensions. The GraphQL and upload
+  handlers read `Extension<Actor>` and never construct one. When auth lands,
+  only that middleware (and `can_write` if needed) changes. Tests that need a
+  read-only actor use `routes::app_with_actor`, which layers a fixed
+  `Extension(actor)` instead.
 - No data is scoped by user or group. Auth adds `users` and `sessions` tables
   and a middleware that fills `actor`; the inventory schema is untouched.
-- The upload and attachment handlers read the same `Actor` from request
-  extensions so the file paths get the same gate.
+- The upload handler checks `can_write()` before reading the body (403).
+  The attachment read handlers are open to every actor and do not take
+  `Extension<Actor>`; one that needs to restrict access reads it the same
+  way.
 
 ## 11. Frontend
 
