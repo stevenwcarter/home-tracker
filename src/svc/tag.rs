@@ -98,10 +98,25 @@ fn validate_parent(conn: &mut SqliteConnection, id: Option<&str>, parent_id: &st
     Ok(())
 }
 
-/// Creates a tag; the name is trimmed and must not be blank, and the parent
-/// (when given) must exist.
+/// A trimmed colour, which must be `#rgb`, `#rrggbb` or `#rrggbbaa` (any
+/// case); blank is no colour. The site paints it as an inline background, so
+/// nothing else may reach it.
+fn optional_color(color: Option<String>) -> Result<Option<String>> {
+    let Some(color) = optional_text(color) else {
+        return Ok(None);
+    };
+    let valid = color.strip_prefix('#').is_some_and(|hex| {
+        matches!(hex.len(), 3 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    });
+    ensure!(valid, "colour must be a hex value like #a1b2c3");
+    Ok(Some(color))
+}
+
+/// Creates a tag; the name is trimmed and must not be blank, the colour (when
+/// given) must be a hex value, and the parent (when given) must exist.
 pub fn create(conn: &mut SqliteConnection, input: NewTag) -> Result<Tag> {
     let name = required_name(&input.name)?;
+    let color = optional_color(input.color)?;
     let parent_id = optional_text(input.parent_id);
     conn.transaction(|conn| {
         if let Some(parent_id) = &parent_id {
@@ -112,7 +127,7 @@ pub fn create(conn: &mut SqliteConnection, input: NewTag) -> Result<Tag> {
             id: Uuid::now_v7().to_string(),
             name,
             description: optional_text(input.description),
-            color: optional_text(input.color),
+            color,
             icon: optional_text(input.icon),
             parent_id,
             created_at: now,
@@ -126,10 +141,12 @@ pub fn create(conn: &mut SqliteConnection, input: NewTag) -> Result<Tag> {
     })
 }
 
-/// Replaces the editable fields of tag `id`. The new parent must exist and
-/// must not be the tag itself or one of its descendants.
+/// Replaces the editable fields of tag `id`. The colour (when given) must be
+/// a hex value, and the new parent must exist and must not be the tag itself
+/// or one of its descendants.
 pub fn update(conn: &mut SqliteConnection, id: &str, changes: TagChanges) -> Result<Tag> {
     let name = required_name(&changes.name)?;
+    let color = optional_color(changes.color)?;
     let parent_id = optional_text(changes.parent_id);
     conn.transaction(|conn| {
         require(conn, id)?;
@@ -140,7 +157,7 @@ pub fn update(conn: &mut SqliteConnection, id: &str, changes: TagChanges) -> Res
             .set((
                 tags::name.eq(name),
                 tags::description.eq(optional_text(changes.description)),
-                tags::color.eq(optional_text(changes.color)),
+                tags::color.eq(color),
                 tags::icon.eq(optional_text(changes.icon)),
                 tags::parent_id.eq(parent_id),
                 tags::updated_at.eq(Utc::now().naive_utc()),
@@ -296,6 +313,59 @@ mod tests {
         let electronics = get(&mut conn, &ids.electronics).unwrap().unwrap();
         assert_eq!(electronics.parent_id, None);
         assert!(delete(&mut conn, &ids.tools).is_err());
+    }
+
+    #[test]
+    fn color_must_be_a_hex_value() {
+        let db = TestDb::new();
+        let mut conn = db.pool.get().unwrap();
+        let ids = seed_sample(&mut conn);
+        let colored = |name: &str, color: &str| NewTag {
+            color: Some(color.to_owned()),
+            ..input(name, None)
+        };
+
+        for (name, color) in [
+            ("Short", "#abc"),
+            ("Long", "#A1b2C3"),
+            ("Alpha", "#a1b2c3ff"),
+        ] {
+            let created = create(&mut conn, colored(name, color)).unwrap();
+            assert_eq!(created.color.as_deref(), Some(color));
+        }
+        let trimmed = create(&mut conn, colored("Padded", " #0f0 ")).unwrap();
+        assert_eq!(trimmed.color.as_deref(), Some("#0f0"));
+
+        for bad in [
+            "red",
+            "#12",
+            "#1234",
+            "#12345",
+            "#1234567",
+            "#123456789",
+            "#ggg",
+            "123456",
+            "#fff;background:url(x)",
+            "url(https://example.com/x.png)",
+        ] {
+            let err = create(&mut conn, colored("Bad", bad)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "colour must be a hex value like #a1b2c3",
+                "{bad}"
+            );
+            let err = update(&mut conn, &ids.tools, colored("Tools", bad)).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "colour must be a hex value like #a1b2c3",
+                "{bad}"
+            );
+        }
+        let tools = get(&mut conn, &ids.tools).unwrap().unwrap();
+        assert_eq!(tools.name, "Tools");
+
+        let updated = update(&mut conn, &ids.tools, colored("Tools", "#ABCDEF")).unwrap();
+        assert_eq!(updated.color.as_deref(), Some("#ABCDEF"));
     }
 
     #[test]

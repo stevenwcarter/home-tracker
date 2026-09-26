@@ -1,6 +1,8 @@
 import clsx from 'clsx';
 import { useEffect, useState } from 'react';
+import { NavLink } from 'react-router-dom';
 import { LocationTree } from 'components/LocationTree';
+import { NAV_LINKS, navLinkClass } from 'components/navLinks';
 import { useCurrentLocationId } from 'hooks/useCurrentLocationId';
 import { useLocations } from 'hooks/useLocations';
 import { pathTo } from 'utils/locationTree';
@@ -98,6 +100,18 @@ export const Sidebar = ({ drawerOpen, onClose }: SidebarProps) => {
           ) : (
             <p className="text-sm text-muted">{loading ? 'Loading…' : 'No locations yet.'}</p>
           )}
+        </nav>
+        {/* The header drops these links below `md`; the drawer carries them there. */}
+        <nav aria-label="Pages" className="mt-6 border-t border-border pt-4 md:hidden">
+          <ul className="flex flex-col gap-1">
+            {NAV_LINKS.map(({ to, label }) => (
+              <li key={to}>
+                <NavLink to={to} onClick={onClose} className={navLinkClass}>
+                  {label}
+                </NavLink>
+              </li>
+            ))}
+          </ul>
         </nav>
       </aside>
     </>

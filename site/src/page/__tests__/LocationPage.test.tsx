@@ -36,6 +36,9 @@ const garage = entityDetail(
   true,
 );
 
+/** Garage with nothing in it, so its Delete is enabled. */
+const emptyGarage = { ...garage, childLocations: [], items: [] };
+
 describe('LocationPage', () => {
   it('shows a loading skeleton, then breadcrumbs, heading, child locations and items', async () => {
     renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock, typesMock()]);
@@ -78,7 +81,7 @@ describe('LocationPage', () => {
     const user = userEvent.setup();
     const deleted = spiedMock(DELETE_ENTITY, { id: 'garage' }, { deleteEntity: true });
     renderRoute('/locations/garage', [
-      entityMock('garage', garage),
+      entityMock('garage', emptyGarage),
       summaryMock,
       typesMock(),
       deleted.mock,
@@ -96,7 +99,7 @@ describe('LocationPage', () => {
     const deleted = spiedMock(DELETE_ENTITY, { id: 'garage' }, { deleteEntity: true });
     const house = entityDetail({ id: 'house', name: 'House' }, true);
     renderRoute('/locations/garage', [
-      entityMock('garage', garage),
+      entityMock('garage', emptyGarage),
       summaryMock,
       typesMock(),
       deleted.mock,
@@ -123,7 +126,7 @@ describe('LocationPage', () => {
   it('stays on the page when the delete is refused', async () => {
     const user = userEvent.setup();
     renderRoute('/locations/garage', [
-      entityMock('garage', garage),
+      entityMock('garage', emptyGarage),
       summaryMock,
       typesMock(),
       {
@@ -141,6 +144,20 @@ describe('LocationPage', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     expect(screen.getByRole('heading', { level: 1, name: 'Garage' })).toBeInTheDocument();
     expect(screen.getByTestId('current-path')).toHaveTextContent(/^\/locations\/garage$/);
+  });
+
+  it('disables Delete while the location holds anything, and says why', async () => {
+    renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock, typesMock()]);
+    const remove = await screen.findByRole('button', { name: 'Delete' });
+    expect(remove).toBeDisabled();
+    expect(remove).toHaveAttribute('title', 'Holds 1 location and 1 item; move them first');
+  });
+
+  it('enables Delete on an empty location', async () => {
+    renderRoute('/locations/garage', [entityMock('garage', emptyGarage), summaryMock, typesMock()]);
+    const remove = await screen.findByRole('button', { name: 'Delete' });
+    expect(remove).toBeEnabled();
+    expect(remove).not.toHaveAttribute('title');
   });
 
   it('says so when the location has no children and no items', async () => {

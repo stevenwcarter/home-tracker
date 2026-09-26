@@ -1,11 +1,15 @@
+import { Link } from 'react-router-dom';
+import { SECONDARY_ACTION } from 'components/buttonStyles';
 import { EntityList } from 'components/EntityList';
 import { LocationCards } from 'components/LocationCards';
 import { Section } from 'components/Section';
 import { StatCard } from 'components/StatCard';
 import { useCurrency } from 'hooks/useCurrency';
+import { useEntityTypes } from 'hooks/useEntityTypes';
 import { useLocations } from 'hooks/useLocations';
 import { useRootItems } from 'hooks/useRootItems';
 import { useSummary } from 'hooks/useSummary';
+import { LOCATION_TYPE_ID, locationType } from 'types/builtIns';
 import { formatCents } from 'utils/currency';
 
 export const HomePage = () => {
@@ -14,6 +18,9 @@ export const HomePage = () => {
   const { items: rootItems, loading: rootItemsLoading } = useRootItems();
   const hasError = !loading && !summary;
   const currency = useCurrency();
+  const { entityTypes } = useEntityTypes();
+  // Before the types load (or if they fail), the built-in Location is the best guess.
+  const newLocationTypeId = locationType(entityTypes)?.id ?? LOCATION_TYPE_ID;
   return (
     <section>
       <h1>Home</h1>
@@ -40,14 +47,28 @@ export const HomePage = () => {
           error={hasError}
         />
       </div>
-      <Section title="Locations">
+      <Section
+        title="Locations"
+        action={
+          <Link to={`/new?type=${newLocationTypeId}`} className={SECONDARY_ACTION}>
+            Add location
+          </Link>
+        }
+      >
         {!locationsLoading && tree.length === 0 ? (
           <p className="text-muted">No locations yet.</p>
         ) : (
           <LocationCards locations={tree.map((node) => node.location)} />
         )}
       </Section>
-      <Section title="Items without a location">
+      <Section
+        title="Items without a location"
+        action={
+          <Link to="/new" className={SECONDARY_ACTION}>
+            Add item
+          </Link>
+        }
+      >
         {!rootItemsLoading && rootItems.length === 0 ? (
           <p className="text-muted">Every item has a location.</p>
         ) : (

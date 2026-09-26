@@ -9,13 +9,19 @@ import { useCurrency } from 'hooks/useCurrency';
 import { useEntity } from 'hooks/useEntity';
 import { useEntityTypes } from 'hooks/useEntityTypes';
 import { NotFound } from 'page/NotFound';
-import { EntityTypeDetail } from 'types/entity';
+import { EntityDetail } from 'types/entity';
+import { locationType } from 'types/builtIns';
+import { plural } from 'utils/plural';
 import { useEntityDeletion } from './useEntityDeletion';
 
-/** The type "Add location" preselects: the one named Location, else any location type. */
-const locationType = (types: EntityTypeDetail[]) =>
-  types.find((type) => type.isLocation && type.name === 'Location') ??
-  types.find((type) => type.isLocation);
+/** Why the location cannot be deleted (the server refuses a non-empty one), or null when it can. */
+const deleteBlocker = ({ childLocations, items }: EntityDetail): string | null => {
+  const held = [
+    childLocations.length > 0 && plural(childLocations.length, 'location', 'locations'),
+    items.length > 0 && plural(items.length, 'item', 'items'),
+  ].filter(Boolean);
+  return held.length > 0 ? `Holds ${held.join(' and ')}; move them first` : null;
+};
 
 export const LocationPage = () => {
   const { id = '' } = useParams();
@@ -32,7 +38,7 @@ export const LocationPage = () => {
   if (!entity) return <p className="text-danger">Could not load this location.</p>;
   if (!entity.isLocation) return <Navigate to={`/items/${id}`} replace />;
 
-  const isEmpty = entity.childLocations.length === 0 && entity.items.length === 0;
+  const blocker = deleteBlocker(entity);
   const newPath = `/locations/${id}/new`;
   const newLocationType = locationType(entityTypes);
   return (
@@ -53,7 +59,13 @@ export const LocationPage = () => {
           <Link to={`/locations/${id}/edit`} className={SECONDARY_ACTION}>
             Edit
           </Link>
-          <button type="button" onClick={askToDelete} className={DANGER_ACTION}>
+          <button
+            type="button"
+            onClick={askToDelete}
+            disabled={blocker !== null}
+            title={blocker ?? undefined}
+            className={DANGER_ACTION}
+          >
             Delete
           </button>
         </div>
@@ -71,7 +83,7 @@ export const LocationPage = () => {
           <EntityList items={entity.items} currency={currency} />
         </Section>
       )}
-      {isEmpty && <p className="mt-8 text-muted">Nothing stored here yet.</p>}
+      {blocker === null && <p className="mt-8 text-muted">Nothing stored here yet.</p>}
       {dialog}
     </section>
   );

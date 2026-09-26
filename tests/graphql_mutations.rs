@@ -253,6 +253,15 @@ async fn create_update_delete_tag() {
     assert_eq!(created["entityCount"], 0);
     let id = created["id"].as_str().unwrap().to_owned();
 
+    // The site paints a tag's colour as an inline background: only hex values get stored.
+    let message = mutate_err(
+        &server,
+        "mutation($input: TagInput!) { createTag(input: $input) { id } }",
+        json!({ "input": { "name": "Sneaky", "color": "red;background:url(x)" } }),
+    )
+    .await;
+    assert_eq!(message, "colour must be a hex value like #a1b2c3");
+
     let data = mutate(
         &server,
         "mutation($id: ID!, $input: TagInput!) {

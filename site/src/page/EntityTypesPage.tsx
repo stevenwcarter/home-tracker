@@ -14,14 +14,12 @@ import {
   useUpdateEntityType,
 } from 'hooks/useEntityTypeMutations';
 import { useEntityTypes } from 'hooks/useEntityTypes';
+import { ITEM_TYPE_ID, LOCATION_TYPE_ID } from 'types/builtIns';
 import { EntityTypeDetail, EntityTypeInput } from 'types/entity';
 import { plural } from 'utils/plural';
 
 /** The seeded Location and Item types, which the server never deletes. */
-const BUILT_IN_TYPE_IDS = new Set([
-  '00000000-0000-7000-8000-000000000001',
-  '00000000-0000-7000-8000-000000000002',
-]);
+const BUILT_IN_TYPE_IDS = new Set([LOCATION_TYPE_ID, ITEM_TYPE_ID]);
 
 /** Why a type cannot be deleted, or null when it can. */
 const deleteBlocker = (type: EntityTypeDetail): string | null => {

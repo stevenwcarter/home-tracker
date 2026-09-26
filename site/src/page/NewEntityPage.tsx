@@ -3,11 +3,9 @@ import { EntityForm } from 'components/EntityForm';
 import { PageSkeleton } from 'components/PageSkeleton';
 import { useCreateEntity } from 'hooks/useEntityMutations';
 import { useEntityTypes } from 'hooks/useEntityTypes';
+import { ITEM_TYPE_ID } from 'types/builtIns';
 import { EntityInput, EntityTypeDetail } from 'types/entity';
 import { entityPath } from 'utils/entityPath';
-
-/** The seeded Item type's id. */
-const ITEM_TYPE_ID = '00000000-0000-7000-8000-000000000002';
 
 /** The type a new entity starts as when the URL names none: the built-in Item, else a non-location "Item". */
 const defaultItemType = (types: EntityTypeDetail[]) =>
