@@ -262,6 +262,21 @@ async fn base_url_is_normalised() {
 }
 
 #[tokio::test]
+async fn a_base_url_with_credentials_is_refused() {
+    let (server, _db, _data) = server();
+
+    let err = update_err(
+        &server,
+        input(json!({ "baseUrl": format!("https://user:{KEY}@host/v1") })),
+    )
+    .await;
+    assert!(err.contains("user name or password"), "{err}");
+    assert!(!err.contains(KEY), "key leaked: {err}");
+    let settings = query_body(&server).await["data"]["aiSettings"].clone();
+    assert_eq!(settings["baseUrl"], json!("https://api.openai.com/v1"));
+}
+
+#[tokio::test]
 async fn blank_models_are_refused() {
     let (server, _db, _data) = server();
 

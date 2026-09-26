@@ -2,10 +2,13 @@
 //!
 //! One call is `POST {base_url}/chat/completions` with the key as a bearer
 //! token. 429 and 5xx answers are retried after each [`OpenAiClient`]
-//! backoff delay; any other 4xx fails at once, except that a 400 about
-//! `response_format` on a `json_schema` request is retried once as
-//! `json_object` (providers without structured outputs), leaving the caller
-//! to validate the JSON. No error or log line carries the key.
+//! backoff delay; any other 4xx fails at once, except for two once-only
+//! downgrades on a 400 that does not use up a retry: a 400 about
+//! `response_format` on a `json_schema` request is resent as `json_object`
+//! (providers without structured outputs; the caller validates the JSON),
+//! and a 400 naming `max_completion_tokens` is resent with the cap as
+//! `max_tokens` (providers that predate OpenAI's rename). No error or log
+//! line carries the key.
 
 use std::error::Error;
 use std::iter;
@@ -81,6 +84,8 @@ impl OpenAiClient {
             .http
             .post(url)
             .bearer_auth(key)
+            // Covers connecting through the last body byte, so a provider
+            // that trickles its body out still times out.
             .timeout(self.timeout)
             .json(body)
             .send()
@@ -108,7 +113,6 @@ impl AiClient for OpenAiClient {
         let key = config.api_key.as_str();
         let mut wire = WireRequest::from(&request);
         let mut retries = self.backoff.iter();
-        let mut fell_back = false;
         let started = Instant::now();
         loop {
             let reply = self.post(&url, key, &wire).await?;
@@ -133,9 +137,7 @@ impl AiClient for OpenAiClient {
                 body = %snippet,
                 "AI provider refused the call"
             );
-            if !fell_back && wire.rejects_json_schema(&reply) {
-                fell_back = true;
-                wire.response_format = Some(WireFormat::JsonObject);
+            if wire.downgrade_for(&reply) {
                 continue;
             }
             if is_retryable(reply.status)
@@ -220,10 +222,11 @@ struct WireRequest<'a> {
     response_format: Option<WireFormat<'a>>,
     /// OpenAI's current name for the cap: its reasoning models (the default
     /// `gpt-5-mini` among them) refuse the older `max_tokens` with a 400.
-    #[serde(
-        rename = "max_completion_tokens",
-        skip_serializing_if = "Option::is_none"
-    )]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_completion_tokens: Option<u32>,
+    /// The cap under its older name, sent only after a provider refused
+    /// `max_completion_tokens`.
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
 }
 
@@ -240,17 +243,36 @@ impl<'a> From<&'a ChatRequest> for WireRequest<'a> {
                 })
                 .collect(),
             response_format: request.response_format.as_ref().map(WireFormat::from),
-            max_tokens: request.max_tokens,
+            max_completion_tokens: request.max_tokens,
+            max_tokens: None,
         }
     }
 }
 
 impl WireRequest<'_> {
-    /// Whether `reply` is a provider refusing this request's `json_schema`.
-    fn rejects_json_schema(&self, reply: &Reply) -> bool {
-        matches!(self.response_format, Some(WireFormat::JsonSchema { .. }))
-            && reply.status == StatusCode::BAD_REQUEST
-            && reply.text.contains("response_format")
+    /// Rewrites this request for a provider whose 400 `reply` refused a
+    /// field it can do without; `false` when there is nothing to downgrade.
+    /// Each downgrade removes what triggers it (`json_schema`, or the
+    /// `max_completion_tokens` cap), so each happens at most once per call.
+    fn downgrade_for(&mut self, reply: &Reply) -> bool {
+        if reply.status != StatusCode::BAD_REQUEST {
+            return false;
+        }
+        let body = reply.text.to_ascii_lowercase();
+        // A schema the provider understood but found invalid is our bug:
+        // surface it rather than silently dropping to `json_object`.
+        if matches!(self.response_format, Some(WireFormat::JsonSchema { .. }))
+            && body.contains("response_format")
+            && !body.contains("invalid schema")
+        {
+            self.response_format = Some(WireFormat::JsonObject);
+            return true;
+        }
+        if self.max_completion_tokens.is_some() && body.contains("max_completion_tokens") {
+            self.max_tokens = self.max_completion_tokens.take();
+            return true;
+        }
+        false
     }
 }
 

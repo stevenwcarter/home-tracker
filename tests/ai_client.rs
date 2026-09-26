@@ -7,7 +7,7 @@
 mod support;
 
 use std::net::TcpListener;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::http::StatusCode;
 use home_tracker::ai::client::{
@@ -305,8 +305,10 @@ async fn an_unreachable_provider_is_a_transport_error() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     drop(listener);
+    // Credentials in the URL (which settings refuse, but a stale row could
+    // hold): neither they nor the key may reach the error.
     let config = AiConfig {
-        base_url: format!("http://{addr}/v1"),
+        base_url: format!("http://user:{KEY}@{addr}/v1"),
         api_key: KEY.to_owned(),
         vision_model: "v".to_owned(),
         synthesis_model: "s".to_owned(),
@@ -315,5 +317,133 @@ async fn an_unreachable_provider_is_a_transport_error() {
 
     let err = client().chat(&config, request()).await.unwrap_err();
     assert!(matches!(err, AiError::Transport(_)), "{err:?}");
-    assert!(!err.to_string().contains(KEY), "{err}");
+    for shown in [err.to_string(), format!("{err:?}")] {
+        assert!(!shown.contains(KEY), "key leaked: {shown}");
+        assert!(!shown.contains("user:"), "URL credentials leaked: {shown}");
+    }
+}
+
+/// A 400 whose message names `max_completion_tokens`, as an older provider says it.
+fn refuses_completion_cap() -> (StatusCode, Value) {
+    (
+        StatusCode::BAD_REQUEST,
+        json!({ "error": { "message": "Unrecognized request argument supplied: MAX_COMPLETION_TOKENS" } }),
+    )
+}
+
+#[tokio::test]
+async fn falls_back_to_max_tokens_when_max_completion_tokens_is_rejected() {
+    let stub = OpenAiStub::start(|index, _| match index {
+        0 => refuses_completion_cap(),
+        _ => ok("fine"),
+    })
+    .await;
+
+    let response = client().chat(&config(&stub), request()).await.unwrap();
+    assert_eq!(response.content, "fine");
+
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(requests[0].body["max_completion_tokens"], json!(100));
+    assert!(requests[0].body.get("max_tokens").is_none());
+    assert_eq!(requests[1].body["max_tokens"], json!(100));
+    assert!(requests[1].body.get("max_completion_tokens").is_none());
+    assert_eq!(
+        requests[1].body["response_format"]["type"],
+        json!("json_schema"),
+        "the cap fallback leaves the format alone"
+    );
+}
+
+#[tokio::test]
+async fn falls_back_to_max_tokens_at_most_once() {
+    let stub = OpenAiStub::start(|_, _| refuses_completion_cap()).await;
+
+    let err = client().chat(&config(&stub), request()).await.unwrap_err();
+    assert!(
+        matches!(err, AiError::Status { status: 400, .. }),
+        "{err:?}"
+    );
+    assert_eq!(stub.requests().len(), 2);
+}
+
+#[tokio::test]
+async fn a_request_without_a_cap_does_not_fall_back_on_the_cap() {
+    let stub = OpenAiStub::start(|_, _| refuses_completion_cap()).await;
+    let request = ChatRequest {
+        max_tokens: None,
+        response_format: None,
+        ..request()
+    };
+
+    let err = client().chat(&config(&stub), request).await.unwrap_err();
+    assert!(
+        matches!(err, AiError::Status { status: 400, .. }),
+        "{err:?}"
+    );
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].body.get("max_completion_tokens").is_none());
+    assert!(requests[0].body.get("max_tokens").is_none());
+}
+
+#[tokio::test]
+async fn the_response_format_fallback_ignores_case() {
+    let stub = OpenAiStub::start(|index, _| match index {
+        0 => (
+            StatusCode::BAD_REQUEST,
+            json!({ "error": { "message": "Unsupported RESPONSE_FORMAT: json_schema" } }),
+        ),
+        _ => ok("{}"),
+    })
+    .await;
+
+    client().chat(&config(&stub), request()).await.unwrap();
+    let requests = stub.requests();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[1].body["response_format"],
+        json!({ "type": "json_object" })
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_schema_is_reported_not_downgraded() {
+    let stub = OpenAiStub::start(|_, _| {
+        (
+            StatusCode::BAD_REQUEST,
+            json!({ "error": { "message": "Invalid schema for response_format 'item': 'required' is missing 'name'." } }),
+        )
+    })
+    .await;
+
+    let err = client().chat(&config(&stub), request()).await.unwrap_err();
+    let AiError::Status { status, snippet } = &err else {
+        panic!("expected a status error, got {err:?}");
+    };
+    assert_eq!(*status, 400);
+    assert!(snippet.contains("Invalid schema"), "{snippet}");
+    assert_eq!(stub.requests().len(), 1);
+}
+
+#[tokio::test]
+async fn the_backoff_is_waited_before_a_retry() {
+    let stub = OpenAiStub::start(|index, _| match index {
+        0 => (
+            StatusCode::TOO_MANY_REQUESTS,
+            json!({ "error": { "message": "slow down" } }),
+        ),
+        _ => ok("fine"),
+    })
+    .await;
+    let client = OpenAiClient::new().with_backoff(vec![Duration::from_millis(150)]);
+
+    let started = Instant::now();
+    client.chat(&config(&stub), request()).await.unwrap();
+    assert!(
+        started.elapsed() >= Duration::from_millis(150),
+        "retried after {:?}",
+        started.elapsed()
+    );
+    assert_eq!(stub.requests().len(), 2);
 }

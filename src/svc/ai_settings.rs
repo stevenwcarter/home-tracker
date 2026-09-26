@@ -78,15 +78,23 @@ impl fmt::Debug for AiConfig {
 
 /// `raw` trimmed and without trailing slashes, so `{base}/chat/completions`
 /// has exactly one slash; refused unless it is an `http`/`https` URL with a
-/// host. The message never echoes the input, which may hold credentials.
+/// host and no `user:password@` part (credentials in the URL would be sent
+/// and shown on the settings screen; the key has its own write-only field).
+/// The message never echoes the input, which may hold credentials.
 pub fn normalise_base_url(raw: &str) -> Result<String> {
     let trimmed = raw.trim().trim_end_matches('/');
-    let valid = Uri::from_str(trimmed).is_ok_and(|uri| {
+    let uri = Uri::from_str(trimmed).ok().filter(|uri| {
         uri.scheme()
             .is_some_and(|s| *s == Scheme::HTTP || *s == Scheme::HTTPS)
             && uri.host().is_some_and(|host| !host.is_empty())
     });
-    ensure!(valid, "base URL must be an http:// or https:// URL");
+    let Some(uri) = uri else {
+        bail!("base URL must be an http:// or https:// URL");
+    };
+    ensure!(
+        !uri.authority().is_some_and(|a| a.as_str().contains('@')),
+        "base URL must not contain a user name or password"
+    );
     Ok(trimmed.to_owned())
 }
 
@@ -395,6 +403,21 @@ mod tests {
             shown.contains(REDACTED) && shown.contains("row.example"),
             "{shown}"
         );
+    }
+
+    #[test]
+    fn normalise_base_url_refuses_credentials_without_echoing_them() {
+        for bad in [
+            "https://user:sk-in-url@host/v1",
+            "http://user@127.0.0.1:8080/v1",
+        ] {
+            let err = normalise_base_url(bad).unwrap_err().to_string();
+            assert!(err.contains("user name or password"), "{bad:?}: {err}");
+            assert!(
+                !err.contains("sk-in-url") && !err.contains("user@"),
+                "{err}"
+            );
+        }
     }
 
     #[test]
