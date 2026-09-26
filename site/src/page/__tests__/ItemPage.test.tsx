@@ -132,6 +132,44 @@ describe('ItemPage', () => {
     );
   });
 
+  it('lists an attachment without a thumbnail by title, even when its MIME type is an image', async () => {
+    const heic = attachment({
+      id: 'h1',
+      title: 'Receipt.heic',
+      mimeType: 'image/heic',
+      thumbnailUrl: null,
+    });
+    const heicOnly = { ...drill, primaryPhoto: null, attachments: [heic] };
+    renderRoute('/items/drill', [entityMock('drill', heicOnly), summaryMock]);
+    const attachments = await screen.findByRole('region', { name: 'Attachments' });
+    expect(within(attachments).getByRole('link', { name: 'Receipt.heic' })).toHaveAttribute(
+      'href',
+      '/attachments/h1?v=abc',
+    );
+    expect(screen.queryByRole('img')).not.toBeInTheDocument();
+    expect(screen.queryByText('No photo')).not.toBeInTheDocument();
+  });
+
+  it('shows the contents of an item that holds other items', async () => {
+    const toolbox = entityDetail({
+      id: 'toolbox',
+      name: 'Toolbox',
+      items: [listItem({ id: 'bit-set', name: 'Bit set' })],
+    });
+    renderRoute('/items/toolbox', [entityMock('toolbox', toolbox), summaryMock]);
+    const contents = await screen.findByRole('region', { name: 'Contents' });
+    expect(within(contents).getByRole('link', { name: 'Bit set' })).toHaveAttribute(
+      'href',
+      '/items/bit-set',
+    );
+  });
+
+  it('has no Contents section when the item holds nothing', async () => {
+    renderRoute('/items/drill', [entityMock('drill', drill), summaryMock]);
+    await screen.findByRole('heading', { level: 1, name: 'Drill' });
+    expect(screen.queryByRole('region', { name: 'Contents' })).not.toBeInTheDocument();
+  });
+
   it('redirects to the location page when the entity is a location', async () => {
     const garage = entityDetail(
       { id: 'garage', name: 'Garage', items: [listItem({ id: 'saw', name: 'Saw' })] },

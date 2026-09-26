@@ -13,6 +13,9 @@ export default defineConfig(() => ({
     globals: true,
     environment: 'jsdom',
     setupFiles: ['./setupVitest.ts'],
+    // Pinned west of Greenwich so date-only strings read as UTC midnight would show
+    // the previous day: a UTC runner would let a date-shift regression pass vacuously.
+    env: { TZ: 'America/Los_Angeles' },
     coverage: {
       reporter: ['text', 'html', 'cobertura', 'lcov', 'json-summary'],
       exclude: ['**/node_modules/**', '**/build/**', '**/*.js', 'src/main.tsx'],

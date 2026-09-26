@@ -59,11 +59,13 @@ describe('LocationPage', () => {
     expect(toast.error).not.toHaveBeenCalled();
   });
 
-  it('offers a disabled "Add item" placeholder', async () => {
+  it('offers a disabled ghost "Add item (coming soon)" placeholder', async () => {
     renderRoute('/locations/garage', [entityMock('garage', garage), summaryMock]);
-    const button = await screen.findByRole('button', { name: 'Add item' });
+    const button = await screen.findByRole('button', { name: 'Add item (coming soon)' });
     expect(button).toBeDisabled();
     expect(button).toHaveAttribute('title', 'Coming in phase 4');
+    expect(button).toHaveClass('border', 'border-border', 'text-muted', 'cursor-not-allowed');
+    expect(button).not.toHaveClass('bg-accent');
   });
 
   it('says so when the location has no children and no items', async () => {

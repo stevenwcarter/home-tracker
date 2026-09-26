@@ -1,6 +1,8 @@
 import { Navigate, useParams } from 'react-router-dom';
 import { Breadcrumbs } from 'components/Breadcrumbs';
 import { DetailRow, DetailsGrid } from 'components/DetailsGrid';
+import { EntityList } from 'components/EntityList';
+import { LocationCards } from 'components/LocationCards';
 import { PageSkeleton } from 'components/PageSkeleton';
 import { Section } from 'components/Section';
 import { TagChips } from 'components/TagChips';
@@ -12,11 +14,16 @@ import { AttachmentRef, EntityDetail, EntityFieldRef } from 'types/entity';
 import { formatCents } from 'utils/currency';
 import { formatDate, formatDateTime } from 'utils/date';
 
-const isImage = (attachment: AttachmentRef) => attachment.mimeType.startsWith('image/');
+/**
+ * Whether an attachment can be shown as a picture. The backend's `is_thumbnailable`
+ * is the single MIME gate: it only hands out a `thumbnailUrl` for formats it can
+ * decode, so an `image/heic` (say) with no thumbnail is listed as a file instead.
+ */
+const hasThumbnail = (attachment: AttachmentRef) => attachment.thumbnailUrl !== null;
 
-/** The photo shown large: the primary photo, else the first image attachment. */
+/** The photo shown large: the primary photo, else the first attachment with a thumbnail. */
 const heroPhoto = (entity: EntityDetail): AttachmentRef | null =>
-  entity.primaryPhoto ?? entity.attachments.find(isImage) ?? null;
+  entity.primaryPhoto ?? entity.attachments.find(hasThumbnail) ?? null;
 
 const price = (cents: number, currency: string) =>
   cents > 0 ? formatCents(cents, currency) : null;
@@ -106,13 +113,23 @@ export const ItemPage = () => {
           />
         </Section>
       )}
+      {(entity.childLocations.length > 0 || entity.items.length > 0) && (
+        <Section title="Contents">
+          <div className="space-y-4">
+            {entity.childLocations.length > 0 && (
+              <LocationCards locations={entity.childLocations} />
+            )}
+            {entity.items.length > 0 && <EntityList items={entity.items} currency={currency} />}
+          </div>
+        </Section>
+      )}
       {otherAttachments.length > 0 && (
         <Section title="Attachments">
           <ul className="flex flex-wrap gap-4">
             {otherAttachments.map((attachment) => (
               <li key={attachment.id}>
                 <a href={attachment.url} className="text-accent hover:underline">
-                  {isImage(attachment) ? (
+                  {hasThumbnail(attachment) ? (
                     <Thumb attachment={attachment} size={300} className="h-24 w-24" />
                   ) : (
                     attachment.title

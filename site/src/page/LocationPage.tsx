@@ -28,9 +28,9 @@ export const LocationPage = () => {
           type="button"
           disabled
           title="Coming in phase 4"
-          className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-accent-text disabled:cursor-not-allowed disabled:opacity-50"
+          className="cursor-not-allowed rounded-md border border-border px-4 py-2 text-sm font-medium text-muted"
         >
-          Add item
+          Add item (coming soon)
         </button>
       </div>
       {entity.description && (
