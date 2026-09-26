@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { renderHook, waitFor } from '@testing-library/react';
 import { useQuery } from '@apollo/client/react';
 import { MockedProvider } from '@apollo/client/testing/react';
@@ -10,6 +10,9 @@ import { GET_ENTITY } from '../queries';
 import { entityDetail } from 'test/entityFixtures';
 
 vi.mock('react-toastify', () => ({ toast: { error: vi.fn() } }));
+import { toast } from 'react-toastify';
+
+beforeEach(() => vi.clearAllMocks());
 
 const render = <T,>(
   path: string,
@@ -60,5 +63,35 @@ describe('useCurrentLocationId', () => {
   it('is null elsewhere', () => {
     expect(render('/').result.current.id).toBeNull();
     expect(render('/search?q=x').result.current.id).toBeNull();
+  });
+
+  // A raw probe on the same query shows when the answer has landed.
+  const probe = (id: string) => () => useQuery(GET_ENTITY, { variables: { id } });
+
+  it('is null, without a toast, for an unknown item id', async () => {
+    const { result } = render(
+      '/items/missing',
+      [
+        {
+          request: { query: GET_ENTITY, variables: { id: 'missing' } },
+          result: { data: { entity: null } },
+        },
+      ],
+      probe('missing'),
+    );
+    await waitFor(() => expect(result.current.extra.data).toEqual({ entity: null }));
+    expect(result.current.id).toBeNull();
+    expect(toast.error).not.toHaveBeenCalled();
+  });
+
+  it('is null, without a toast, when the item query fails', async () => {
+    const { result } = render(
+      '/items/drill',
+      [{ request: { query: GET_ENTITY, variables: { id: 'drill' } }, error: new Error('boom') }],
+      probe('drill'),
+    );
+    await waitFor(() => expect(result.current.extra.error).toBeDefined());
+    expect(result.current.id).toBeNull();
+    expect(toast.error).not.toHaveBeenCalled();
   });
 });

@@ -4,6 +4,7 @@ import { useApolloClient, useQuery } from '@apollo/client/react';
 import { MockedProvider } from '@apollo/client/testing/react';
 import type { MockedResponse } from '@apollo/client/testing';
 import React from 'react';
+import { InMemoryCache } from '@apollo/client';
 import { useRefetchingMutation } from '../useRefetchingMutation';
 import { DELETE_ENTITY, GET_ENTITY, GET_LOCATIONS } from '../queries';
 import { entityDetail, listItem, locationSummary, SUMMARY } from 'test/entityFixtures';
@@ -159,5 +160,38 @@ describe('useRefetchingMutation', () => {
     // `Entity:garage`, forcing a second, unrequested `GetLocations` fetch.
     expect(result.current.client.cache.extract()).toHaveProperty('Entity:garage');
     expect(result.current.locations?.map((location) => location.id)).toEqual(['house', 'garage']);
+  });
+
+  it("evicts the call's alsoEvict ids alongside the hook's evict ids", async () => {
+    const cache = new InMemoryCache();
+    cache.writeQuery({
+      query: GET_LOCATIONS,
+      data: {
+        locations: ['house', 'garage', 'shelf', 'drill'].map((id) =>
+          locationSummary({ id, name: id }),
+        ),
+      },
+    });
+    const { result } = renderHook(
+      () =>
+        useRefetchingMutation<{ deleteEntity: boolean }, { id: string }>(DELETE_ENTITY, {
+          refetch: [],
+          evict: (_data, { id }) => [id],
+        }),
+      {
+        wrapper: ({ children }: { children: React.ReactNode }) => (
+          <MockedProvider mocks={[deleteMock('drill')]} cache={cache}>
+            {children}
+          </MockedProvider>
+        ),
+      },
+    );
+    await act(async () => {
+      await result.current[0]({ id: 'drill' }, ['garage', null, undefined]);
+    });
+    const cached = Object.keys(cache.extract());
+    expect(cached).not.toContain('Entity:drill');
+    expect(cached).not.toContain('Entity:garage');
+    expect(cached).toEqual(expect.arrayContaining(['Entity:house', 'Entity:shelf']));
   });
 });

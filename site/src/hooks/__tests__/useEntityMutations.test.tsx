@@ -1,9 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act } from '@testing-library/react';
+import { act, renderHook } from '@testing-library/react';
+import { InMemoryCache } from '@apollo/client';
+import { MockedProvider } from '@apollo/client/testing/react';
 import type { MockedResponse } from '@apollo/client/testing';
+import React from 'react';
 import { useCreateEntity, useDeleteEntity, useUpdateEntity } from '../useEntityMutations';
-import { CREATE_ENTITY, DELETE_ENTITY, UPDATE_ENTITY } from '../queries';
-import { entityDetail } from 'test/entityFixtures';
+import { CREATE_ENTITY, DELETE_ENTITY, GET_LOCATIONS, UPDATE_ENTITY } from '../queries';
+import { entityDetail, locationSummary } from 'test/entityFixtures';
 import { REFETCHED_SUMMARY, setupWithSummary } from 'test/mutationHarness';
 import { toEntityInput } from 'utils/entityInput';
 
@@ -116,5 +119,103 @@ describe('useDeleteEntity', () => {
     expect(toast.error).toHaveBeenCalledWith(
       'Could not delete: Garage still contains 2 entities; move them first',
     );
+  });
+});
+
+/**
+ * Renders `useHook` over an explicit cache seeded with House, Garage, Shelf
+ * and Drill, all reachable from `ROOT_QUERY.locations` so `cache.gc()` keeps
+ * them unless they are evicted. No query is active, so nothing refetches and
+ * the cache shows exactly what the mutation evicted.
+ */
+const renderOverSeededCache = <T,>(useHook: () => T, mocks: MockedResponse[]) => {
+  const cache = new InMemoryCache();
+  cache.writeQuery({
+    query: GET_LOCATIONS,
+    data: {
+      locations: [
+        locationSummary({ id: 'house', name: 'House' }),
+        locationSummary({ id: 'garage', name: 'Garage', parentId: 'house' }),
+        locationSummary({ id: 'shelf', name: 'Shelf', parentId: 'garage' }),
+        locationSummary({ id: 'drill', name: 'Drill', parentId: 'garage' }),
+      ],
+    },
+  });
+  const rendered = renderHook(useHook, {
+    wrapper: ({ children }: { children: React.ReactNode }) => (
+      <MockedProvider mocks={mocks} cache={cache}>
+        {children}
+      </MockedProvider>
+    ),
+  });
+  const cached = () => Object.keys(cache.extract());
+  return { ...rendered, cached };
+};
+
+describe('entity mutation cache eviction', () => {
+  it('update on a move evicts the old and the new parent', async () => {
+    const movedInput = { ...input, parentId: 'house' };
+    const { result, cached } = renderOverSeededCache(useUpdateEntity, [
+      {
+        request: { query: UPDATE_ENTITY, variables: { id: 'drill', input: movedInput } },
+        result: { data: { updateEntity: { ...drill, parentId: 'house' } } },
+      },
+    ]);
+    expect(cached()).toEqual(expect.arrayContaining(['Entity:garage', 'Entity:house']));
+    await act(async () => {
+      await result.current.update(drill, movedInput);
+    });
+    expect(cached()).not.toContain('Entity:garage');
+    expect(cached()).not.toContain('Entity:house');
+    expect(cached()).toContain('Entity:shelf');
+  });
+
+  it('update without a move evicts neither parent', async () => {
+    const renamed = { ...input, name: 'Hammer drill' };
+    const { result, cached } = renderOverSeededCache(useUpdateEntity, [
+      {
+        request: { query: UPDATE_ENTITY, variables: { id: 'drill', input: renamed } },
+        result: { data: { updateEntity: { ...drill, name: 'Hammer drill' } } },
+      },
+    ]);
+    let updated: unknown;
+    await act(async () => {
+      updated = await result.current.update(drill, renamed);
+    });
+    expect(updated).toEqual({ ...drill, name: 'Hammer drill' });
+    expect(cached()).toEqual(
+      expect.arrayContaining(['Entity:garage', 'Entity:house', 'Entity:shelf']),
+    );
+  });
+
+  it("create evicts the new entity's parent", async () => {
+    const saw = entityDetail({ id: 'saw', name: 'Saw', parentId: 'garage' });
+    const sawInput = toEntityInput(saw);
+    const { result, cached } = renderOverSeededCache(useCreateEntity, [
+      {
+        request: { query: CREATE_ENTITY, variables: { input: sawInput } },
+        result: { data: { createEntity: saw } },
+      },
+    ]);
+    await act(async () => {
+      await result.current.create(sawInput);
+    });
+    expect(cached()).not.toContain('Entity:garage');
+    expect(cached()).toEqual(expect.arrayContaining(['Entity:house', 'Entity:shelf']));
+  });
+
+  it('delete evicts the entity and its parent', async () => {
+    const { result, cached } = renderOverSeededCache(useDeleteEntity, [
+      {
+        request: { query: DELETE_ENTITY, variables: { id: 'drill' } },
+        result: { data: { deleteEntity: true } },
+      },
+    ]);
+    await act(async () => {
+      await result.current.remove(drill);
+    });
+    expect(cached()).not.toContain('Entity:drill');
+    expect(cached()).not.toContain('Entity:garage');
+    expect(cached()).toEqual(expect.arrayContaining(['Entity:house', 'Entity:shelf']));
   });
 });

@@ -20,6 +20,8 @@ export const useCurrentLocationId = (): string | null => {
   const { data } = useQuery<{ entity: EntityDetail | null }>(GET_ENTITY, {
     variables: { id: itemId ?? '' },
     skip: itemId === null,
+    // Explicit: the item page has already loaded this entity, so the cache answers.
+    fetchPolicy: 'cache-first',
   });
   if (locationId !== null) return locationId;
   return itemId === null ? null : (data?.entity?.parentId ?? null);
