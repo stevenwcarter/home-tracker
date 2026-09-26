@@ -642,7 +642,7 @@ fn require_photo(conn: &mut SqliteConnection, id: &str) -> Result<IngestPhoto> {
 }
 
 /// Batch `id`, refused with [`IngestError::NotCollecting`] once submitted.
-fn require_collecting(conn: &mut SqliteConnection, id: &str) -> Result<IngestBatch> {
+pub(crate) fn require_collecting(conn: &mut SqliteConnection, id: &str) -> Result<IngestBatch> {
     let batch = require_batch(conn, id)?;
     ensure!(
         batch.status == IngestBatchStatus::Collecting,

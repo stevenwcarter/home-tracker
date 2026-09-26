@@ -3,11 +3,16 @@
 //! header-emitting code with the attachment routes.
 
 use std::fs;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::task::{Context, Poll};
+use std::time::Duration;
 
 use axum::Router;
 use axum::body::{self, Body};
 use axum::http::{HeaderMap, Request, StatusCode, header};
+use axum::response::Response;
 use axum_test::multipart::{MultipartForm, Part};
 use axum_test::{TestResponse, TestServer};
 use diesel::prelude::*;
@@ -23,9 +28,13 @@ use home_tracker::svc::thumbnail_service::ThumbnailService;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
+use tokio::io::{self, AsyncRead, ReadBuf};
+use tokio::time;
+use tokio_util::io::ReaderStream;
 use tower::ServiceExt;
 
 const IMMUTABLE: &str = "public, max-age=31536000, immutable";
+const BOUNDARY: &str = "home-tracker-test-boundary";
 
 /// A seeded database, a data dir, a collecting batch with one item, and a
 /// server whose thumbnail service the test can inspect.
@@ -134,6 +143,31 @@ fn header_text(response: &TestResponse, name: &str) -> String {
 
 fn sha256_hex(bytes: &[u8]) -> String {
     hex::encode(Sha256::digest(bytes))
+}
+
+/// A body that records being polled and never yields.
+struct Untouchable(Arc<AtomicBool>);
+
+impl AsyncRead for Untouchable {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        _: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        self.0.store(true, Ordering::SeqCst);
+        Poll::Pending
+    }
+}
+
+fn multipart_type() -> String {
+    format!("multipart/form-data; boundary={BOUNDARY}")
+}
+
+async fn json_body(response: Response) -> Value {
+    let bytes = body::to_bytes(response.into_body(), usize::MAX)
+        .await
+        .unwrap();
+    serde_json::from_slice(&bytes).unwrap_or_else(|err| panic!("not JSON ({err}): {bytes:?}"))
 }
 
 fn read_only() -> Actor {
@@ -308,22 +342,63 @@ async fn a_submitted_batch_refuses_more_photos_with_409() {
 
 #[tokio::test]
 async fn read_only_actor_is_403() {
+    // Refused before the body is read: a body that never yields would hang a
+    // handler that reads it, and records that it was polled.
     let f = Fixture::new();
-    let server = TestServer::new(app_with_actor(
-        f.db.pool.clone(),
-        f.data.path().to_path_buf(),
-        read_only(),
-    ));
+    let router = app_with_actor(f.db.pool.clone(), f.data.path().to_path_buf(), read_only());
+    let polled = Arc::new(AtomicBool::new(false));
+    let request = Request::post(format!("/api/ingest/items/{}/photos", f.item.id))
+        .header(header::CONTENT_TYPE, multipart_type())
+        .body(Body::from_stream(ReaderStream::new(Untouchable(
+            Arc::clone(&polled),
+        ))))
+        .unwrap();
 
-    let response = server
-        .post(&format!("/api/ingest/items/{}/photos", f.item.id))
-        .multipart(photo_form(jpeg(8, 6)))
-        .await;
+    let response = time::timeout(Duration::from_secs(2), router.oneshot(request))
+        .await
+        .expect("the handler waited on the body")
+        .unwrap();
 
-    response.assert_status(StatusCode::FORBIDDEN);
-    assert!(!error_message(&response).is_empty());
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert!(json_body(response).await["error"].is_string());
+    assert!(!polled.load(Ordering::SeqCst), "the body was polled");
     assert_eq!(f.originals(), Vec::<String>::new());
     assert_eq!(f.staged_rows(), 0);
+}
+
+#[tokio::test]
+async fn staged_originals_are_not_compressed() {
+    // Served byte-for-byte under their sha256 ETag, like attachments. Text
+    // (which the compression layer would compress) proves the route sits
+    // outside it; the row is inserted by hand since uploads take images only.
+    let f = Fixture::new();
+    let bytes = "plain text that is long enough to be worth compressing. ".repeat(20);
+    let sha = sha256_hex(bytes.as_bytes());
+    fs::create_dir_all(f.data.path().join("originals")).unwrap();
+    fs::write(f.data.path().join("originals").join(&sha), &bytes).unwrap();
+    let photo = fixtures::ingest_photo(
+        &mut f.db.pool.get().unwrap(),
+        &f.item.id,
+        &sha,
+        "text/plain",
+    );
+
+    let response = f
+        .server
+        .get(&format!("/ingest/photos/{}", photo.id))
+        .add_header("accept-encoding", "gzip")
+        .await;
+
+    response.assert_status_ok();
+    assert!(
+        response.maybe_header("content-encoding").is_none(),
+        "staged originals must not be compressed"
+    );
+    assert_eq!(
+        header_text(&response, "content-length"),
+        bytes.len().to_string()
+    );
+    assert_eq!(response.as_bytes().as_ref(), bytes.as_bytes());
 }
 
 #[tokio::test]
@@ -331,10 +406,7 @@ async fn over_limit_is_413_json() {
     let f = Fixture::new();
     // Refused on the declared length alone, before any handler runs.
     let request = Request::post(format!("/api/ingest/items/{}/photos", f.item.id))
-        .header(
-            header::CONTENT_TYPE,
-            "multipart/form-data; boundary=home-tracker-test-boundary",
-        )
+        .header(header::CONTENT_TYPE, multipart_type())
         .header(
             header::CONTENT_LENGTH,
             MAX_UPLOAD_BYTES + MULTIPART_OVERHEAD_BYTES + 1,
@@ -345,11 +417,7 @@ async fn over_limit_is_413_json() {
     let response = f.router().oneshot(request).await.unwrap();
 
     assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
-    let bytes = body::to_bytes(response.into_body(), usize::MAX)
-        .await
-        .unwrap();
-    let body: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(body["error"].is_string(), "{body}");
+    assert!(json_body(response).await["error"].is_string());
 
     // Within the body limit, so the file's own size is what is refused, and
     // a file of exactly the limit fits: the 2 MiB default is not in force.

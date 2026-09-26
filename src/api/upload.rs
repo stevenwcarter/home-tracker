@@ -235,7 +235,7 @@ pub(crate) struct Form {
     pub(crate) staged: Staged,
     /// The client's name for the file; advisory, used only for the title.
     pub(crate) filename: Option<String>,
-    pub(crate) primary: bool,
+    primary: bool,
 }
 
 /// Reads the form, staging its one `file` field under `originals_dir`.

@@ -20,7 +20,7 @@ use tempfile::TempPath;
 use tracing::info;
 use uuid::Uuid;
 
-use crate::kinds::{AttachmentKind, IngestBatchStatus};
+use crate::kinds::AttachmentKind;
 use crate::models::{Attachment, IngestPhoto, Thumbnail};
 use crate::schema::attachments;
 use crate::svc::ingest::{self, IngestError};
@@ -208,11 +208,8 @@ pub fn store_ingest_photo(
 fn require_collecting_item(conn: &mut SqliteConnection, item_id: &str) -> Result<(), UploadError> {
     let item =
         ingest::get_item(conn, item_id)?.ok_or(UploadError::NotFound(UploadTarget::IngestItem))?;
-    match ingest::get_batch(conn, &item.batch_id)? {
-        Some(batch) if batch.status == IngestBatchStatus::Collecting => Ok(()),
-        Some(_) => Err(UploadError::Conflict),
-        None => Err(UploadError::NotFound(UploadTarget::IngestItem)),
-    }
+    ingest::require_collecting(conn, &item.batch_id).map_err(ingest_refusal)?;
+    Ok(())
 }
 
 /// An upload whose bytes are validated and stored at their content address,
@@ -952,11 +949,16 @@ mod tests {
     #[test]
     fn a_batch_submitted_after_placing_is_a_conflict_and_leaves_no_file() {
         // The early check passed, then the batch was submitted: the insert's
-        // own check refuses, and the newly placed original goes.
+        // own check refuses, and the newly placed original goes unless an
+        // attachment shares it.
         let h = Harness::new();
+        let kept = h
+            .upload(&h.ids.screws, &jpeg(7, 7), None, false)
+            .unwrap()
+            .attachment;
         let mut conn = h.db.pool.get().unwrap();
         let (batch, item) = ingest_batch(&mut conn, None);
-        let kept = store_ingest_photo(
+        let staged = store_ingest_photo(
             &mut conn,
             h.data.path(),
             &item.id,
@@ -964,14 +966,47 @@ mod tests {
             None,
         )
         .unwrap();
-        let placed = place(h.data.path(), h.stage(&jpeg(8, 8))).unwrap();
+        let fresh = place(h.data.path(), h.stage(&jpeg(8, 8))).unwrap();
+        let shared = place(h.data.path(), h.stage(&jpeg(7, 7))).unwrap();
         ingest::submit(&mut conn, &batch.id).unwrap();
 
-        let err =
-            commit_ingest_photo(&mut conn, h.data.path(), &item.id, placed, None).unwrap_err();
+        for placed in [fresh, shared] {
+            let err =
+                commit_ingest_photo(&mut conn, h.data.path(), &item.id, placed, None).unwrap_err();
+            assert!(matches!(err, UploadError::Conflict), "{err:?}");
+        }
 
-        assert!(matches!(err, UploadError::Conflict), "{err:?}");
-        assert_eq!(h.files(), [kept.sha256.as_str()]);
+        let mut expected = [kept.sha256, staged.sha256];
+        expected.sort();
+        assert_eq!(h.files(), expected);
+    }
+
+    #[test]
+    fn a_batch_deleted_after_placing_is_not_found_and_leaves_no_file() {
+        // The early check passed, then the batch (and its item) went: the
+        // insert refuses with the item's 404, and the placed original goes
+        // unless an attachment shares it.
+        let h = Harness::new();
+        let kept = h
+            .upload(&h.ids.screws, &jpeg(7, 7), None, false)
+            .unwrap()
+            .attachment;
+        let mut conn = h.db.pool.get().unwrap();
+        let (batch, item) = ingest_batch(&mut conn, None);
+        let fresh = place(h.data.path(), h.stage(&jpeg(8, 8))).unwrap();
+        let shared = place(h.data.path(), h.stage(&jpeg(7, 7))).unwrap();
+        ingest::delete_batch(&mut conn, h.data.path(), &batch.id).unwrap();
+
+        for placed in [fresh, shared] {
+            let err =
+                commit_ingest_photo(&mut conn, h.data.path(), &item.id, placed, None).unwrap_err();
+            assert!(
+                matches!(err, UploadError::NotFound(UploadTarget::IngestItem)),
+                "{err:?}"
+            );
+        }
+
+        assert_eq!(h.files(), [kept.sha256]);
     }
 
     #[test]
