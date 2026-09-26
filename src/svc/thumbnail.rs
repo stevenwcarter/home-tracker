@@ -21,8 +21,9 @@ pub struct Generated {
 /// The largest original edge, in pixels, that will be decoded (8192² ≈ 64 MP).
 const MAX_DECODE_EDGE: u32 = 8192;
 
-/// The most the decoder may allocate for one original.
-const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
+/// The most the decoder may allocate for one original. Uploads whose decoded
+/// image would need more are refused.
+pub(crate) const MAX_DECODE_ALLOC: u64 = 256 * 1024 * 1024;
 
 /// Decoder bounds. A small file can declare enormous dimensions, so the
 /// header is checked against these before any pixel buffer is allocated.

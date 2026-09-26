@@ -10,7 +10,7 @@ use std::path::Path;
 use anyhow::{Context, anyhow};
 use chrono::Utc;
 use diesel::prelude::*;
-use image::ImageReader;
+use image::{ImageDecoder, ImageReader};
 use sha2::{Digest, Sha256};
 use tempfile::TempPath;
 use tracing::info;
@@ -38,6 +38,11 @@ pub enum UploadError {
 /// An upload being received: a temp file under `originals/` that is hashed
 /// as it is written. Dropped before [`TempUpload::finish`], it removes the
 /// temp file, so an aborted request leaves nothing behind.
+///
+/// # Blocking
+///
+/// Every method does synchronous file I/O: call them from `spawn_blocking`
+/// (or accept a short block per chunk).
 pub struct TempUpload {
     file: BufWriter<File>,
     temp: TempPath,
@@ -120,6 +125,11 @@ pub struct StoredUpload {
 /// becomes its primary photo, as does any photo uploaded with `primary`.
 /// On any failure the temp file is removed, and so is a newly placed
 /// original that no attachment references.
+///
+/// # Blocking
+///
+/// Reads the file, renames it and queries SQLite synchronously: call it from
+/// `spawn_blocking`.
 pub fn store(
     conn: &mut SqliteConnection,
     data_dir: &Path,
@@ -128,29 +138,32 @@ pub fn store(
     filename: Option<&str>,
     primary: bool,
 ) -> Result<StoredUpload, UploadError> {
+    // Refused before any file work; `commit` checks again inside its
+    // transaction in case the entity is deleted meanwhile.
     if entity::get(conn, entity_id)?.is_none() {
         return Err(UploadError::NotFound);
     }
+    let placed = place(data_dir, staged)?;
+    commit(conn, data_dir, entity_id, placed, filename, primary)
+}
+
+/// An upload whose bytes are validated and stored at their content address,
+/// claimed until [`commit`] has inserted its row or given up.
+struct Placed {
+    claim: attachment::PlacingOriginal,
+    format: ImageFormat,
+    sha256: String,
+    size_bytes: i64,
+}
+
+/// Validates `staged` and moves it to its content address, or drops it when
+/// those bytes are already stored. The claim is taken before looking for the
+/// file, so a concurrent delete of the last other sharer leaves it in place.
+fn place(data_dir: &Path, staged: Staged) -> Result<Placed, UploadError> {
     let format = staged.format().ok_or(UploadError::Unsupported)?;
     staged.check_header()?;
-
-    let now = Utc::now().naive_utc();
-    let row = Attachment {
-        id: Uuid::now_v7().to_string(),
-        entity_id: entity_id.to_owned(),
-        kind: AttachmentKind::Photo,
-        is_primary: false,
-        title: clean_title(filename, format.extension()),
-        mime_type: format.mime().to_owned(),
-        sha256: staged.sha256.clone(),
-        size_bytes: i64::try_from(staged.size_bytes).context("upload too large")?,
-        created_at: now,
-        updated_at: now,
-    };
-
+    let size_bytes = i64::try_from(staged.size_bytes).context("upload too large")?;
     let original = attachment::original_path(data_dir, &staged.sha256);
-    // Claimed before looking for the file, and held until the row commits, so
-    // a concurrent delete of the last other sharer leaves it in place.
     let claim = attachment::PlacingOriginal::claim(original.clone());
     if !original.exists() {
         staged
@@ -158,25 +171,61 @@ pub fn store(
             .persist(&original)
             .map_err(|err| anyhow!(err.error).context("moving the upload into place"))?;
     }
-    // Otherwise these bytes are already stored, and dropping `staged` on
-    // return removes the duplicate temp file.
-    let inserted = conn.transaction(|conn| insert_photo(conn, row, primary));
-    drop(claim);
+    // Otherwise these bytes are already stored, and the unmoved temp file is
+    // removed when the rest of `staged` drops at return.
+    Ok(Placed {
+        claim,
+        format,
+        sha256: staged.sha256,
+        size_bytes,
+    })
+}
+
+/// Inserts the attachment row for `placed`, then releases its claim. On
+/// failure the original is removed unless something else references it.
+fn commit(
+    conn: &mut SqliteConnection,
+    data_dir: &Path,
+    entity_id: &str,
+    placed: Placed,
+    filename: Option<&str>,
+    primary: bool,
+) -> Result<StoredUpload, UploadError> {
+    let now = Utc::now().naive_utc();
+    let row = Attachment {
+        id: Uuid::now_v7().to_string(),
+        entity_id: entity_id.to_owned(),
+        kind: AttachmentKind::Photo,
+        is_primary: false,
+        title: clean_title(filename, placed.format.extension()),
+        mime_type: placed.format.mime().to_owned(),
+        sha256: placed.sha256.clone(),
+        size_bytes: placed.size_bytes,
+        created_at: now,
+        updated_at: now,
+    };
+    // Immediate, so simultaneous first uploads to one entity queue for the
+    // write lock instead of failing to upgrade a read transaction.
+    let inserted = conn
+        .immediate_transaction(|conn| insert_photo(conn, row, primary))
+        .map_err(UploadError::Io)
+        .and_then(|row| row.ok_or(UploadError::NotFound));
+    drop(placed.claim);
     inserted
         .map(|attachment| StoredUpload { attachment })
-        .map_err(|err| {
-            attachment::remove_original(conn, data_dir, &staged.sha256);
-            UploadError::Io(err)
-        })
+        .inspect_err(|_| attachment::remove_original(conn, data_dir, &placed.sha256))
 }
 
 /// Inserts photo `row`, making it its entity's primary photo when asked to or
-/// when the entity has no photo yet.
+/// when the entity has no photo yet. `None` when the entity no longer exists.
 fn insert_photo(
     conn: &mut SqliteConnection,
     mut row: Attachment,
     primary: bool,
-) -> anyhow::Result<Attachment> {
+) -> anyhow::Result<Option<Attachment>> {
+    if entity::get(conn, &row.entity_id)?.is_none() {
+        return Ok(None);
+    }
     let has_photo = diesel::select(diesel::dsl::exists(
         attachments::table
             .filter(attachments::entity_id.eq(&row.entity_id))
@@ -192,7 +241,7 @@ fn insert_photo(
         attachment::set_primary(conn, &row.id)?;
         row.is_primary = true;
     }
-    Ok(row)
+    Ok(Some(row))
 }
 
 impl Staged {
@@ -202,46 +251,90 @@ impl Staged {
         sniff::sniff(&self.head[..len])
     }
 
-    /// Reads the image header, refusing one that does not decode or declares
-    /// dimensions beyond the thumbnailer's limits. No pixels are decoded.
+    /// Reads the image header, refusing one that does not decode or whose
+    /// dimensions or decode buffer exceed the thumbnailer's limits, so every
+    /// stored photo can be thumbnailed. No pixels are decoded.
     fn check_header(&self) -> Result<(), UploadError> {
         let mut reader = ImageReader::open(&self.temp)
             .context("opening the upload's temp file")?
             .with_guessed_format()
             .context("reading the upload's temp file")?;
         reader.limits(thumbnail::decode_limits());
-        match reader.into_dimensions() {
-            Ok(_) => Ok(()),
-            Err(err) => {
-                info!(sha256 = %self.sha256, %err, "refusing an unreadable upload");
-                Err(UploadError::Unreadable)
-            }
+        let reason = match reader.into_decoder() {
+            Ok(decoder) if decoder.total_bytes() <= thumbnail::MAX_DECODE_ALLOC => return Ok(()),
+            Ok(decoder) => format!("decoding needs {} bytes", decoder.total_bytes()),
+            Err(err) => err.to_string(),
+        };
+        info!(sha256 = %self.sha256, %reason, "refusing an unreadable upload");
+        Err(UploadError::Unreadable)
+    }
+}
+
+/// The longest title kept, in characters.
+const MAX_TITLE_CHARS: usize = 255;
+
+/// A safe attachment title from the client's `raw` filename: only its last
+/// path component (either separator), without control or format characters
+/// and surrounding whitespace, and at most [`MAX_TITLE_CHARS`] long. Falls
+/// back to `photo.<ext>` when nothing usable is left.
+pub fn clean_title(raw: Option<&str>, ext: &str) -> String {
+    let name: String = raw
+        .and_then(|raw| raw.rsplit(['/', '\\']).next())
+        .unwrap_or_default()
+        .chars()
+        .filter(|&c| !c.is_control() && !is_format_char(c))
+        .collect();
+    match name.trim() {
+        "" | "." | ".." => format!("photo.{ext}"),
+        trimmed => {
+            let end = trimmed
+                .char_indices()
+                .nth(MAX_TITLE_CHARS)
+                .map_or(trimmed.len(), |(at, _)| at);
+            trimmed[..end].trim_end().to_owned()
         }
     }
 }
 
-/// A safe attachment title from the client's `raw` filename: only its last
-/// path component (either separator), without control characters and
-/// surrounding whitespace. Falls back to `photo.<ext>` when nothing usable is
-/// left.
-pub fn clean_title(raw: Option<&str>, ext: &str) -> String {
-    let name = raw
-        .and_then(|raw| raw.rsplit(['/', '\\']).next())
-        .map(|last| last.chars().filter(|c| !c.is_control()).collect::<String>())
-        .unwrap_or_default();
-    match name.trim() {
-        "" | "." | ".." => format!("photo.{ext}"),
-        trimmed => trimmed.to_owned(),
-    }
+/// Unicode general category Cf (format characters, as of Unicode 15.1). They
+/// are invisible, and some, such as the bidi override U+202E, make a name
+/// display differently from what it is.
+fn is_format_char(c: char) -> bool {
+    matches!(
+        c,
+        '\u{AD}'
+            | '\u{600}'..='\u{605}'
+            | '\u{61C}'
+            | '\u{6DD}'
+            | '\u{70F}'
+            | '\u{890}'..='\u{891}'
+            | '\u{8E2}'
+            | '\u{180E}'
+            | '\u{200B}'..='\u{200F}'
+            | '\u{202A}'..='\u{202E}'
+            | '\u{2060}'..='\u{2064}'
+            | '\u{2066}'..='\u{206F}'
+            | '\u{FEFF}'
+            | '\u{FFF9}'..='\u{FFFB}'
+            | '\u{110BD}'
+            | '\u{110CD}'
+            | '\u{13430}'..='\u{1343F}'
+            | '\u{1BCA0}'..='\u{1BCA3}'
+            | '\u{1D173}'..='\u{1D17A}'
+            | '\u{E0001}'
+            | '\u{E0020}'..='\u{E007F}'
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
+    use std::sync::Barrier;
+    use std::thread;
 
     use super::*;
     use crate::db::TestDb;
-    use crate::svc::fixtures::{SampleIds, jpeg, png, png_header, seed_sample};
+    use crate::svc::fixtures::{SampleIds, jpeg, png, png_header, png_header_rgba16, seed_sample};
 
     /// A migrated, seeded database and an empty data dir with `originals/`.
     struct Harness {
@@ -458,6 +551,17 @@ mod tests {
     }
 
     #[test]
+    fn a_decode_buffer_over_the_allocation_limit_is_unreadable() {
+        // 8192² is within the edge limit, but 16-bit RGBA needs 512 MiB.
+        let h = Harness::new();
+        let err = h
+            .upload(&h.ids.screws, &png_header_rgba16(8192, 8192), None, false)
+            .unwrap_err();
+        assert!(matches!(err, UploadError::Unreadable), "{err:?}");
+        assert!(h.files().is_empty(), "{:?}", h.files());
+    }
+
+    #[test]
     fn unknown_entity_is_not_found() {
         let h = Harness::new();
         let err = h
@@ -486,6 +590,74 @@ mod tests {
 
         assert!(matches!(err, UploadError::Io(_)), "{err:?}");
         assert!(h.files().is_empty(), "{:?}", h.files());
+    }
+
+    #[test]
+    fn a_placed_upload_keeps_its_original_through_a_delete_of_the_last_sharer() {
+        // Carry-over (a): identical bytes are placed (deduped onto the
+        // existing file) while the only other sharer is deleted.
+        let h = Harness::new();
+        let bytes = jpeg(24, 24);
+        let first = h
+            .upload(&h.ids.screws, &bytes, None, false)
+            .unwrap()
+            .attachment;
+        let placed = place(h.data.path(), h.stage(&bytes)).unwrap();
+        let mut conn = h.db.pool.get().unwrap();
+
+        attachment::delete(&mut conn, h.data.path(), &first.id).unwrap();
+        let stored = commit(&mut conn, h.data.path(), &h.ids.old_tv, placed, None, false)
+            .unwrap()
+            .attachment;
+
+        assert_eq!(h.files(), [stored.sha256.as_str()]);
+    }
+
+    #[test]
+    fn an_entity_deleted_after_placing_is_not_found_and_leaves_no_file() {
+        let h = Harness::new();
+        let placed = place(h.data.path(), h.stage(&jpeg(8, 8))).unwrap();
+        let mut conn = h.db.pool.get().unwrap();
+
+        let err = commit(
+            &mut conn,
+            h.data.path(),
+            "deleted-meanwhile",
+            placed,
+            None,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, UploadError::NotFound), "{err:?}");
+        assert!(h.files().is_empty(), "{:?}", h.files());
+    }
+
+    #[test]
+    fn simultaneous_first_uploads_all_succeed_with_one_primary() {
+        let h = Harness::new();
+        let uploads = 6;
+        let staged: Vec<Staged> = (0..uploads).map(|n| h.stage(&jpeg(8 + n, 8))).collect();
+        let start = Barrier::new(staged.len());
+        let results: Vec<Result<StoredUpload, UploadError>> = thread::scope(|scope| {
+            let workers: Vec<_> = staged
+                .into_iter()
+                .map(|staged| {
+                    let (h, start) = (&h, &start);
+                    scope.spawn(move || {
+                        let mut conn = h.db.pool.get().unwrap();
+                        start.wait();
+                        store(&mut conn, h.data.path(), &h.ids.screws, staged, None, false)
+                    })
+                })
+                .collect();
+            workers.into_iter().map(|w| w.join().unwrap()).collect()
+        });
+
+        for result in &results {
+            assert!(result.is_ok(), "{result:?}");
+        }
+        assert_eq!(h.primaries(&h.ids.screws).len(), 1);
     }
 
     #[test]
@@ -535,9 +707,25 @@ mod tests {
             (Some("\u{7}\u{1b}"), "photo.jpg"),
             (Some(""), "photo.jpg"),
             (None, "photo.jpg"),
+            // A right-to-left override would display "evil\u{202E}gpj.exe" as
+            // "evilexe.jpg"; zero-width and BOM characters are invisible.
+            (Some("evil\u{202E}gpj.exe"), "evilgpj.exe"),
+            (Some("\u{FEFF}a\u{200B}b.jpg"), "ab.jpg"),
+            (Some("\u{202E}\u{200D}"), "photo.jpg"),
         ];
         for (raw, expected) in cases {
             assert_eq!(clean_title(raw, "jpg"), expected, "{raw:?}");
         }
+    }
+
+    #[test]
+    fn clean_title_is_capped_at_255_characters() {
+        let long = format!("{}.jpg", "é".repeat(300));
+        let title = clean_title(Some(&long), "jpg");
+        assert_eq!(title.chars().count(), MAX_TITLE_CHARS);
+        assert!(title.chars().all(|c| c == 'é'));
+        // Trailing whitespace exposed by the cut is trimmed too.
+        let spaced = format!("{} {}", "a".repeat(254), "b".repeat(10));
+        assert_eq!(clean_title(Some(&spaced), "jpg"), "a".repeat(254));
     }
 }

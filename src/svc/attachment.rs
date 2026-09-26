@@ -248,6 +248,9 @@ impl Drop for PlacingOriginal {
 /// rather than reported, and an already-missing file is fine.
 pub(crate) fn remove_original(conn: &mut SqliteConnection, data_dir: &Path, sha256: &str) {
     let path = original_path(data_dir, sha256);
+    // PLACING is held across the COUNT on purpose: a claim taken after this
+    // check cannot slip between it and the removal. Claims never wait on the
+    // database, so this cannot deadlock; it only briefly serialises claims.
     let placing = placing();
     if placing.contains_key(&path) {
         return;

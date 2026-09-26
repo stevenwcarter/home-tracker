@@ -290,12 +290,23 @@ pub fn png(w: u32, h: u32) -> Vec<u8> {
 /// which carries no pixel data: a small file with enormous declared
 /// dimensions, for exercising the decoder limits.
 pub fn png_header(w: u32, h: u32) -> Vec<u8> {
+    // Bit depth 8, greyscale.
+    png_header_of(w, h, 8, 0)
+}
+
+/// Like [`png_header`], but 16-bit RGBA: eight bytes per pixel, so modest
+/// dimensions already declare a very large decode buffer.
+pub fn png_header_rgba16(w: u32, h: u32) -> Vec<u8> {
+    png_header_of(w, h, 16, 6)
+}
+
+fn png_header_of(w: u32, h: u32, bit_depth: u8, colour_type: u8) -> Vec<u8> {
     let mut out = b"\x89PNG\r\n\x1a\n".to_vec();
     let mut ihdr = Vec::new();
     ihdr.extend_from_slice(&w.to_be_bytes());
     ihdr.extend_from_slice(&h.to_be_bytes());
-    // Bit depth 8, greyscale, deflate, adaptive filtering, no interlace.
-    ihdr.extend_from_slice(&[8, 0, 0, 0, 0]);
+    // Deflate, adaptive filtering, no interlace.
+    ihdr.extend_from_slice(&[bit_depth, colour_type, 0, 0, 0]);
     png_chunk(&mut out, b"IHDR", &ihdr);
     png_chunk(&mut out, b"IDAT", &[]);
     png_chunk(&mut out, b"IEND", &[]);

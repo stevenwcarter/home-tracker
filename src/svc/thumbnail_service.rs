@@ -87,22 +87,27 @@ impl ThumbnailService {
         let Some(att) = self.load_attachment(attachment_id)? else {
             return Ok(None);
         };
-        if !thumbnail::is_thumbnailable(&att.mime_type) || self.has_failed(&att) {
+        if !thumbnail::is_thumbnailable(&att.mime_type) {
             return Ok(None);
         }
+        // Stored thumbnails are looked up before the failure cache: an
+        // undecodable original must not hide a size that is already stored.
         let db_size = i32::try_from(size.get()).context("thumbnail size out of range")?;
         if let Some(hit) = self.cached(attachment_id, db_size)? {
             return Ok(Some((att, hit)));
+        }
+        if self.has_failed(&att) {
+            return Ok(None);
         }
 
         let lease = self.lease((attachment_id.to_owned(), size));
         let _guard = lease.lock.lock().await;
         // Another request may have generated it, or failed to, while this one waited.
-        if self.has_failed(&att) {
-            return Ok(None);
-        }
         if let Some(hit) = self.cached(attachment_id, db_size)? {
             return Ok(Some((att, hit)));
+        }
+        if self.has_failed(&att) {
+            return Ok(None);
         }
         let Some(generated) = self.generate(&att, size).await? else {
             return Ok(None);
@@ -351,5 +356,45 @@ mod tests {
         let (_, thumb) = svc.get_or_generate("att-1", size).await.unwrap().unwrap();
         assert_eq!(thumb.size, 300);
         assert_eq!(svc.generations(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_failed_decode_does_not_hide_stored_thumbnails() {
+        // An imported 500px thumbnail stays servable after its original fails
+        // to decode for another size.
+        let (svc, db, data) = service();
+        let bad = "ee".repeat(32);
+        fs::write(
+            attachment::original_path(data.path(), &bad),
+            b"\xFF\xD8\xFF junk",
+        )
+        .unwrap();
+        let mut conn = db.pool.get().unwrap();
+        diesel::update(attachments::table.find("att-1"))
+            .set(attachments::sha256.eq(&bad))
+            .execute(&mut conn)
+            .unwrap();
+        attachment::insert_thumbnail(
+            &mut conn,
+            &Thumbnail {
+                attachment_id: "att-1".to_owned(),
+                size: 500,
+                mime_type: GENERATED_MIME.to_owned(),
+                width: 4,
+                height: 3,
+                data: vec![1; 8],
+                created_at: Utc::now().naive_utc(),
+            },
+        )
+        .unwrap();
+        let [small, medium] = [300, 500].map(|px| thumbnail::allowed_size(px).unwrap());
+
+        assert!(svc.get_or_generate("att-1", small).await.unwrap().is_none());
+        let (_, stored) = svc
+            .get_or_generate("att-1", medium)
+            .await
+            .unwrap()
+            .expect("the stored 500px thumbnail is still served");
+        assert_eq!(stored.data, [1; 8]);
     }
 }
